@@ -204,6 +204,126 @@ mkdir -p ~/.gbrain/integrations/x-to-brain
 echo '{"ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","event":"setup_complete","source_version":"0.7.0","status":"ok","details":{"user_id":"X_USER_ID"}}' >> ~/.gbrain/integrations/x-to-brain/heartbeat.jsonl
 ```
 
+## Implementation Guide
+
+These are production-tested patterns from a deployment tracking 19+ accounts.
+
+### Deletion Detection Algorithm
+
+```
+detect_deletions(prevIds, currentIds):
+  for id in prevIds:
+    if id in currentIds: continue          // still exists
+
+    stored = load_tweet(id)
+    if not stored: continue                // never stored
+
+    // HEURISTIC 1: Only check tweets < 7 days old
+    age = now - stored.created_at
+    if age > 7_DAYS: continue              // aged out of API window
+
+    // HEURISTIC 2: Skip if last seen > 48h ago
+    staleness = now - stored.last_updated
+    if staleness > 48_HOURS: continue      // fell out of window, not deleted
+
+    // HEURISTIC 3: Already logged?
+    if deletion_file_exists(id): continue
+
+    // VERIFY via direct API call
+    res = GET /tweets/{id}
+    if res.status == 404 OR (res.ok AND no data):
+      save_deletion(id, original_tweet, detected_at)
+      alert(f"DELETION: {author} deleted: {preview}")
+```
+
+**Why the heuristics matter:** Without #2 (48h staleness check), you get false
+positives on old tweets that just aged out of the API search window. Without #1
+(7-day cap), you'd investigate thousands of old tweets on every run.
+
+### Engagement Velocity Tracking
+
+```
+track_engagement(id, metrics):
+  snapshots = load_snapshots(id)
+  last = snapshots[-1] if snapshots else null
+
+  if last AND metrics_equal(last, metrics): return  // no change
+
+  snapshots.append({timestamp: now, metrics})
+  if len(snapshots) > 100: snapshots = snapshots[-100:]  // cap growth
+
+  // Alert conditions (OR logic):
+  if last:
+    old_likes = last.like_count
+    new_likes = metrics.like_count
+
+    // Condition 1: 2x on established tweets (>= 50 likes)
+    if old_likes >= 50 AND new_likes >= old_likes * 2:
+      alert(f"VELOCITY: {id} likes {old_likes} -> {new_likes}")
+
+    // Condition 2: Absolute jump > 100
+    elif (new_likes - old_likes) > 100:
+      alert(f"VELOCITY: {id} likes {old_likes} -> {new_likes}")
+```
+
+**Threshold design:** `50` minimum prevents noise from small tweets going 2→4.
+The `100` absolute jump catches big spikes on tweets with any baseline.
+
+### Atomic File Writes
+
+```
+atomic_write(path, obj):
+  tmp = path + '.tmp'
+  writeFileSync(tmp, JSON.stringify(obj, null, 2))
+  renameSync(tmp, path)  // atomic on most filesystems
+```
+
+If the process dies mid-write, the `.tmp` file is left behind but the original
+is untouched. Critical when you have thousands of per-tweet JSON files.
+
+### Rate Limit Handling
+
+```
+rate_limits = {}  // per endpoint
+
+after_each_request(endpoint, headers):
+  rate_limits[endpoint] = {
+    remaining: headers['x-rate-limit-remaining'],
+    reset: headers['x-rate-limit-reset']
+  }
+
+is_rate_limited(endpoint, min_remaining=2):
+  r = rate_limits[endpoint]
+  return r AND r.remaining <= min_remaining
+```
+
+Reserve 2 requests per endpoint so other streams still work. If mentions
+hits the limit, own timeline and searches can still run.
+
+### Stdout Contract
+
+The collector prints structured lines the cron agent can parse:
+```
+RUN_START:{timestamp}
+OWN_TWEETS:{total} ({new} new)
+MENTIONS:{total} ({new} new)
+DELETION_DETECTED:{id}:{author}:{preview}
+VELOCITY_ALERT:{id}:likes:{old}->{new}:{minutes}min
+RUN_COMPLETE:{timestamp}:tweets_stored={N}:deletions={N}:velocity_alerts={N}
+```
+
+### What the Agent Should Test After Setup
+
+1. **Deletion detection:** Post a tweet, collect, delete it, collect again.
+   Verify deletion is detected on second run.
+2. **Rate limit:** Run collect with very low remaining quota. Verify it stops
+   gracefully and reports which streams were skipped.
+3. **Engagement:** Find a tweet with 45 likes. Mock it jumping to 90 (no alert,
+   < 50 threshold). Then 50→100 (alert: 2x). Then 30→150 (alert: >100 jump).
+4. **Deduplication:** Collect, then like one of your own tweets, collect again.
+   Verify `_collected_at` is preserved (not overwritten).
+5. **Atomic writes:** Kill the process mid-collection. Verify no corrupted JSON.
+
 ## Cost Estimate
 
 | Component | Monthly Cost |

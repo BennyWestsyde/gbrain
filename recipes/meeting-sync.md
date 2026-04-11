@@ -229,6 +229,132 @@ Tell the user: "Meeting sync is set up. Every meeting recorded by Circleback
 automatically becomes a searchable brain page. Attendee pages get updated with
 meeting history. Action items are extracted. Sync runs 3x daily on weekdays."
 
+## Implementation Guide
+
+These are production-tested patterns from syncing 280+ meeting transcripts.
+
+### SSE Response Parsing
+
+Circleback returns JSONRPC 2.0 over SSE (Server-Sent Events):
+```
+call_circleback(tool_name, args):
+  body = {jsonrpc: '2.0', id: next_id(), method: 'tools/call',
+          params: {name: tool_name, arguments: args}}
+
+  res = POST CIRCLEBACK_ENDPOINT, body,
+        headers: {Authorization: Bearer TOKEN, Accept: 'application/json, text/event-stream'}
+
+  text = res.text()
+  for line in text.split('\n'):
+    if line.startsWith('data: '):
+      json = JSON.parse(line[6:])             // strip "data: "
+      if json.result?.content?.[0]?.text:
+        return JSON.parse(json.result.content[0].text)  // double-parse
+      if json.error:
+        throw json.error
+```
+
+**Non-obvious:** The response is JSON inside SSE inside JSONRPC. You have to:
+1. Strip `data: ` prefix
+2. Parse the SSE line as JSON
+3. Drill into `result.content[0].text`
+4. Parse THAT as JSON again (it's a string containing JSON)
+
+### Idempotency (Double-Check)
+
+```
+meeting_exists(source_id):
+  // Method 1: grep all meeting files for source_id
+  result = shell(f'grep -rl "source_id: {source_id}" {MEETINGS_DIR}/')
+  if result: return true
+
+  // Method 2: check filename (backup)
+  slug = slugify(meeting.name)
+  if file_exists(f'{MEETINGS_DIR}/{date}-{slug}.md'): return true
+
+  return false
+```
+
+**Why double-check:** grep catches source_id matches even if the filename changed.
+File existence catches cases where grep fails (e.g., permission issues).
+
+### Auto-Tagging from Meeting Name
+
+```
+auto_tag(meeting_name):
+  name = meeting_name.toLowerCase()
+  tags = []
+  if 'office hours' in name or ' oh ' in name: tags.push('oh')
+  if 'standup' in name or 'sync' in name: tags.push('sync')
+  if '1:1' in name or '1on1' in name: tags.push('1on1')
+  if 'board' in name: tags.push('board')
+  if 'policy' in name or 'civic' in name: tags.push('civic')
+  if not tags: tags.push('meeting')
+  return tags
+```
+
+### Meeting Page Structure
+
+```
+---
+title: "Weekly Team Sync"
+type: meeting
+date: 2026-04-10
+duration: 32 min
+source: circleback
+source_id: cb_abc123
+attendees:
+  - {name: Alice Chen, email: alice@company.com}
+  - {name: Bob Park, email: bob@company.com}
+tags: [sync]
+---
+
+# Weekly Team Sync
+
+## Summary
+[Circleback AI summary]
+
+## Attendees
+- Alice Chen
+- Bob Park
+
+## Action Items
+- [ ] Alice: unblock API migration by Friday
+
+---
+
+## Transcript
+
+**Alice Chen** (00:00): Let's start with the roadmap...
+**Bob Park** (02:15): The prototype is basically done...
+```
+
+### Git Commit After Sync
+
+```
+if new_meetings_created > 0:
+  shell('git add -A', cwd=BRAIN_DIR)
+  msg = f'sync: {count} meeting(s) from Circleback ({start} to {end})'
+  shell(f'git commit -m "{msg}"', cwd=BRAIN_DIR)
+  shell('git push', cwd=BRAIN_DIR)
+```
+
+The sync script commits and pushes automatically. This triggers GBrain's
+live sync to index the new pages.
+
+### What the Agent Should Test After Setup
+
+1. **SSE parsing:** Verify `SearchMeetings` returns parseable data (the double-JSON
+   parsing is the most common failure point).
+2. **Idempotency:** Sync a meeting, add a note to the file manually, sync again.
+   Verify the meeting is skipped (not re-created or overwritten).
+3. **Attendee filtering:** Sync a meeting that includes a conference room in attendees.
+   Verify the room doesn't appear in the attendee list.
+4. **Auto-tagging:** Sync a meeting named "1:1 with Sarah". Verify tag is `1on1`.
+5. **Transcript formatting:** Verify speaker names and timestamps are formatted
+   correctly (speaker bold, timestamp in parentheses).
+6. **Git commit:** Sync 2+ meetings. Verify the git commit message includes the count.
+
 ## Cost Estimate
 
 | Component | Monthly Cost |

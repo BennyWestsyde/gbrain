@@ -229,6 +229,86 @@ mkdir -p ~/.gbrain/integrations/email-to-brain
 echo '{"ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","event":"setup_complete","source_version":"0.7.0","status":"ok"}' >> ~/.gbrain/integrations/email-to-brain/heartbeat.jsonl
 ```
 
+## Implementation Guide
+
+These are production-tested patterns. Follow them exactly.
+
+### Noise Filtering (Deterministic)
+
+```
+NOISE_SENDERS = ['noreply', 'no-reply', 'notifications@', 'calendar-notification',
+                 'mailer-daemon', 'postmaster', 'donotreply']
+
+is_noise(email):
+  from = email.from.toLowerCase()
+  return NOISE_SENDERS.some(p => from.includes(p))  // substring match
+```
+
+Simple substring matching, not regex. `notifications@slack.com` matches because
+`notifications@` is in the pattern list. Order doesn't matter.
+
+### Signature Detection
+
+```
+SIGNATURE_PATTERNS = [
+  /docusign/i, /dropbox sign/i, /hellosign/i, /pandadoc/i,
+  /please sign/i, /signature needed/i, /ready for your signature/i,
+  /everyone has signed/i, /you just signed/i
+]
+
+is_signature(email):
+  subject = email.subject || ''
+  from = email.from || ''
+  return SIGNATURE_PATTERNS.some(p => p.test(subject) || p.test(from))
+```
+
+Test BOTH subject AND from. Signature requests come from services that have
+"docusign" in the sender address, not just the subject.
+
+### Gmail Link Generation (CRITICAL)
+
+```
+gmail_link(messageId, authuser):
+  return `https://mail.google.com/mail/u/?authuser=${authuser}#inbox/${messageId}`
+```
+
+The `authuser` parameter is CRITICAL. Without it, the link opens in the default
+Gmail account, not the right one. Each email record stores its account separately.
+Generate these in CODE, never by the LLM. Links must be 100% reliable.
+
+### Deduplication
+
+```
+collect():
+  state = load_state()
+  since = state.lastCollect ? `newer_than:${hours_since}h` : 'newer_than:1d'
+
+  for account in accounts:
+    inbox = gmail.list(query=since, max=50)
+    for msg in inbox:
+      if msg.id in state.knownMessageIds: continue  // already seen
+      record = build_record(msg)
+      state.knownMessageIds[msg.id] = record
+
+    // ALSO pull sent mail to detect replies
+    sent = gmail.list(query=`from:${account.email} ${since}`, max=30)
+    for msg in sent:
+      state.knownMessageIds[msg.id] = {is_sent: true}
+```
+
+**Why sent mail matters:** Without it, the digest shows "awaiting response" on
+threads you already replied to. Sent mail acts as a negative filter.
+
+### What the Agent Should Test After Setup
+
+1. **Noise filtering:** Send a test email from `noreply@test.com`. Run collect.
+   Verify it appears in noise section, not triage section.
+2. **Gmail links:** Click a link from the digest. Verify it opens the correct
+   account (not the default one).
+3. **Deduplication:** Run collect twice in 1 minute. Verify no duplicate messages.
+4. **Sent mail:** Reply to an email manually. Run collect. Verify the thread is
+   marked as replied-to in the digest.
+
 ## Cost Estimate
 
 | Component | Monthly Cost |

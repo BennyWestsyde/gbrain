@@ -275,6 +275,101 @@ Tell the user: "Calendar-to-brain is set up. You have [N] days of calendar histo
 indexed. I can now prep you for meetings by pulling attendee context from the brain.
 Weekly sync keeps it current."
 
+## Implementation Guide
+
+These are production-tested patterns from syncing 13 years of calendar data.
+
+### Smart Chunking (Monthly vs Weekly)
+
+```
+generate_chunks(start, end, dense_after='2023-01-01'):
+  chunks = []
+  current = start
+
+  while current < end:
+    if current < dense_after:
+      next = current + 1_MONTH    // sparse period: monthly
+    else:
+      next = current + 7_DAYS     // dense period: weekly
+
+    chunks.append({from: current, to: min(next, end)})
+    current = next
+
+  return chunks
+```
+
+**Why:** Monthly chunks for sparse years (2014-2023) = ~96 API calls for 8 years.
+Weekly for everything would be ~600+ calls. Per-calendar `startYear` avoids
+pulling empty months (e.g., don't query 2014-2020 for a calendar created in 2020).
+
+### Attendee Filtering
+
+```
+filter_attendees(attendees):
+  return attendees.filter(a =>
+    !a.email?.includes('@resource.calendar.google.com') AND  // conference rooms
+    !a.email?.includes('@group.calendar.google.com') AND     // mailing lists
+    !a.name?.startsWith('YC-SF-')                            // internal distros
+  )
+```
+
+Without this, your attendee list is polluted with "Conference Room A" and
+"engineering-all@company.com". You want actual people.
+
+### Merge with Existing Files (Preserve Manual Notes)
+
+```
+write_daily_file(date, events, dir):
+  path = f'{dir}/{date}.md'
+  calendar_md = format_events(events)
+
+  if file_exists(path):
+    existing = read(path)
+    if '## Calendar' in existing:
+      // Replace ONLY the calendar section, keep everything else
+      before = existing.split('## Calendar')[0]
+      after_match = regex_search(existing, /## [A-Z](?!alendar)/)  // next section
+      after = after_match ? existing[match_index:] : ''
+      write(path, f'{before}## Calendar\n\n{calendar_md}\n{after}')
+    else:
+      write(path, f'## Calendar\n\n{calendar_md}\n---\n\n{existing}')
+  else:
+    write(path, calendar_md)
+```
+
+**Critical:** Only touch `## Calendar`. Everything else is preserved. If you
+manually added `## Notes` to a daily file, it survives re-sync.
+
+### Date/Time Parsing Edge Cases
+
+```
+parse_event_date(event):
+  // All-day: event.start = "2024-01-15" (no T)
+  // Timed: event.start = "2024-01-15T10:00:00-08:00" (with T)
+  if 'T' in event.start:
+    return event.start[0:10]    // extract date from datetime
+  return event.start            // already a date
+
+format_time(iso_str):
+  if not iso_str or 'T' not in iso_str: return 'all-day'
+  // Extract hours:minutes, convert to 12-hour
+  // Edge: 00:00 = 12:00 AM, 12:00 = 12:00 PM, 13:00 = 1:00 PM
+```
+
+### What the Agent Should Test After Setup
+
+1. **Monthly vs weekly:** Run from 2014 with dense_after=2023. Verify pre-2023
+   makes ~12 API calls per year, post-2023 makes ~4 per month.
+2. **Attendee filtering:** Create a meeting with a conference room and a mailing
+   list. Sync. Verify neither appears in the daily file.
+3. **Merge preservation:** Add `## Notes` to a daily file manually. Sync calendar.
+   Verify notes are preserved.
+4. **All-day events:** Create an all-day event and a timed event on the same day.
+   Verify all-day appears first, timed events sorted by start time.
+5. **Cancelled events:** Cancel a meeting. Sync. Verify it doesn't appear.
+6. **Per-calendar startYear:** Sync a calendar created in 2022 with startYear=2022.
+   Verify no API calls for years before 2022.
+
 ## Cost Estimate
 
 | Component | Monthly Cost |
