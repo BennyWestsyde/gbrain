@@ -172,21 +172,30 @@ it, it's active immediately — no delay needed."
 
 **STOP HERE until OpenAI validates.**
 
-**Credential 3: ngrok Auth Token**
+**Credential 3: ngrok Account (Hobby tier recommended)**
 
 Tell the user:
-"I need your ngrok auth token. Here's where to find it:
+"I need your ngrok auth token. **I strongly recommend the Hobby tier ($8/mo)**
+because it gives you a fixed domain that never changes. With the free tier,
+your URL changes every time ngrok restarts, breaking Twilio and Claude Desktop.
 
-1. Go to https://dashboard.ngrok.com/get-started/your-authtoken
-   (sign up free at https://dashboard.ngrok.com/signup if you don't have an account)
-2. You'll see your **Authtoken** displayed on the page
-3. Copy it and paste it to me"
+1. Go to https://dashboard.ngrok.com/signup (sign up)
+2. **Recommended:** Go to https://dashboard.ngrok.com/billing and upgrade to
+   **Hobby** ($8/mo). This gives you a fixed domain.
+3. If you upgraded: go to https://dashboard.ngrok.com/domains and click
+   **'+ New Domain'**. Choose a name (e.g., `your-brain-voice.ngrok.app`).
+4. Go to https://dashboard.ngrok.com/get-started/your-authtoken
+5. Copy your **Authtoken** and paste it to me
+6. Also tell me your fixed domain name (if you created one)"
 
 ```bash
 ngrok config add-authtoken $NGROK_TOKEN \
   && echo "PASS: ngrok configured" \
   || echo "FAIL: ngrok auth token rejected"
 ```
+
+If user has a fixed domain, use `--url` flag (Step 3 below).
+If user stayed on free tier, URLs will change on restart (the watchdog handles this).
 
 **Credential 4: Messaging Platform (for call summaries)**
 
@@ -208,14 +217,20 @@ Tell the user: "All credentials validated. Moving to server setup."
 ### Step 3: Start ngrok Tunnel
 
 ```bash
+# With fixed domain (Hobby tier — recommended):
+ngrok http 8765 --url your-brain-voice.ngrok.app
+
+# Without fixed domain (free tier — URL changes on restart):
 ngrok http 8765
 ```
 
-This will display a URL like `https://abc123.ngrok-free.app`. Save this URL — you'll
-need it for Twilio webhook configuration in Step 5.
+If using a fixed domain, the URL is always `https://your-brain-voice.ngrok.app`.
+If using free tier, copy the URL from the ngrok output (changes every restart).
 
-Note: ngrok runs in the foreground. The agent should run this in a background process
-or new terminal tab, then proceed.
+Note: ngrok runs in the foreground. Run it in a background process or new terminal tab.
+
+The same ngrok account can also serve your GBrain MCP server (see
+[ngrok Setup](docs/mcp/NGROK_SETUP.md) for the full multi-service pattern).
 
 ### Step 4: Create Voice Server
 
@@ -257,10 +272,44 @@ The voice server needs these components in `server.mjs`:
    - Posts summary to the user's messaging platform
    - Runs `gbrain sync --no-pull --no-embed` to index the new page
 
-**Reference implementation:** A complete voice server is included in the GBrain
-examples directory (coming in a future release). For now, the architecture above
-and the OpenAI Realtime API docs (https://platform.openai.com/docs/guides/realtime)
-provide the building blocks.
+6. **WebRTC endpoint** (optional, for browser-based calling):
+   - `POST /session` — accepts SDP offer, forwards to OpenAI Realtime `/v1/realtime/calls` as multipart form-data, returns SDP answer
+   - `GET /call` — serves a web client HTML page with:
+     - WebRTC connection to OpenAI Realtime API
+     - RNNoise WASM noise suppression (AudioWorklet)
+     - Push-to-talk AND auto-VAD mode switching
+     - Pipeline: Microphone → RNNoise denoise → MediaStream → WebRTC → OpenAI
+   - `POST /tool` — receives tool calls from the WebRTC data channel, executes them, returns results
+   - This lets users call the voice agent from a browser tab instead of a phone
+
+   **WebRTC session creation pseudocode:**
+   ```
+   POST /session:
+     sdp = request.body  // caller's SDP offer
+     form = new FormData()
+     form.append('sdp', sdp)
+     form.append('session', JSON.stringify({
+       type: 'realtime',
+       model: 'gpt-4o-realtime-preview',
+       audio: {output: {voice: VOICE}},
+       instructions: buildPrompt(null)
+     }))
+
+     response = POST 'https://api.openai.com/v1/realtime/calls'
+       Authorization: Bearer OPENAI_API_KEY
+       body: form
+
+     return response.text()  // SDP answer
+   ```
+
+   **Important WebRTC gotchas:**
+   - `voice` goes under `audio.output.voice`, not top-level
+   - Do NOT send `turn_detection` in session config (not accepted by `/v1/realtime/calls`)
+   - Do NOT send `session.update` on connect (server already configured it)
+   - Trigger greeting via data channel after WebRTC connects
+
+**Reference implementation:** The architecture above and the OpenAI Realtime API
+docs (https://platform.openai.com/docs/guides/realtime) provide the building blocks.
 
 ### Step 5: Configure Twilio Phone Number
 
