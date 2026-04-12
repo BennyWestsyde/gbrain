@@ -18,7 +18,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate']);
 
 async function main() {
   const args = process.argv.slice(2);
@@ -250,6 +250,21 @@ async function handleCliOnly(command: string, args: string[]) {
   if (command === 'publish') {
     const { runPublish } = await import('./commands/publish.ts');
     await runPublish(subArgs);
+    return;
+  }
+  if (command === 'backlinks') {
+    const { runBacklinks } = await import('./commands/backlinks.ts');
+    await runBacklinks(subArgs);
+    return;
+  }
+  if (command === 'lint') {
+    const { runLint } = await import('./commands/lint.ts');
+    await runLint(subArgs);
+    return;
+  }
+  if (command === 'report') {
+    const { runReport } = await import('./commands/report.ts');
+    await runReport(subArgs);
     return;
   }
 

@@ -53,6 +53,9 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `skills/_brain-filing-rules.md` — Cross-cutting brain filing rules (referenced by all brain-writing skills)
 - `skills/migrations/` — Version migration files with feature_pitch YAML frontmatter
 - `src/commands/publish.ts` — Deterministic brain page publisher (code+skill pair, zero LLM calls)
+- `src/commands/backlinks.ts` — Back-link checker and fixer (enforces Iron Law)
+- `src/commands/lint.ts` — Page quality linter (catches LLM artifacts, placeholder dates)
+- `src/commands/report.ts` — Structured report saver (audit trail for maintenance/enrichment)
 - `openclaw.plugin.json` — ClawHub bundle plugin manifest
 
 ## Commands
@@ -81,7 +84,10 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/pglite-engine.test.ts` (PGLite engine, all 37 BrainEngine methods),
 `test/utils.test.ts` (shared SQL utilities), `test/engine-factory.test.ts` (engine factory + dynamic imports),
 `test/integrations.test.ts` (recipe parsing, CLI routing, recipe validation),
-`test/publish.test.ts` (content stripping, encryption, password generation, HTML output).
+`test/publish.test.ts` (content stripping, encryption, password generation, HTML output),
+`test/backlinks.test.ts` (entity extraction, back-link detection, timeline entry generation),
+`test/lint.test.ts` (LLM artifact detection, code fence stripping, frontmatter validation),
+`test/report.test.ts` (report format, directory structure).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)

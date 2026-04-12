@@ -70,10 +70,22 @@ All notable changes to GBrain will be documented in this file.
   uploaded, source_url, type).
 - **All skills** updated to reference actual `gbrain files` commands instead of
   theoretical patterns.
+- **Back-link enforcer closes the loop.** `gbrain backlinks check` scans your
+  brain for entity mentions without back-links. `gbrain backlinks fix` creates
+  them. The Iron Law of Back-Linking is in every skill, now the code enforces it.
+
+- **Page linter catches LLM slop.** `gbrain lint` flags "Of course! Here is..."
+  preambles, wrapping code fences, placeholder dates, missing frontmatter, broken
+  citations, and empty sections. `gbrain lint --fix` auto-strips the fixable ones.
+  Every brain that uses AI for ingestion accumulates this. Now it's one command.
+
+- **Audit trail for everything.** `gbrain report --type enrichment-sweep` saves
+  timestamped reports to `brain/reports/{type}/YYYY-MM-DD-HHMM.md`. The maintain
+  skill references this for enrichment sweeps, meeting syncs, and maintenance runs.
+
 - **Publish skill** added to manifest (8th skill). First code+skill pair.
 - Skills version bumped to 0.9.0.
-- 34 new unit tests for publish (content stripping, encryption, password
-  generation, HTML output, citation patterns). Total: 376 pass.
+- 67 new unit tests across publish, backlinks, lint, and report. Total: 409 pass.
 
 ## [0.8.0] - 2026-04-11
 
