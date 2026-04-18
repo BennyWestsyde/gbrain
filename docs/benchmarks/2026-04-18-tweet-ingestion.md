@@ -21,7 +21,7 @@ LLM (sub-agent) or through code (Minions)?
 
 ## Methodology
 
-**Task:** Pull ~100 @garrytan tweets for one month from the X full-archive
+**Task:** Pull ~100 my social posts for one month from the X full-archive
 search API, write a markdown brain page with frontmatter + engagement
 metrics + tweet links, git commit, and submit a `gbrain sync` job.
 
@@ -153,7 +153,7 @@ Examples:
 
 ```bash
 # 1. Set environment
-export X_BEARER_TOKEN=...           # X Enterprise API (full-archive)
+export X_BEARER_TOKEN=...           # external API bearer token
 export DATABASE_URL=postgresql://... # Postgres with gbrain schema v7+
 export BRAIN_PATH=/path/to/brain    # Git repo with brain pages
 export ANTHROPIC_API_KEY=sk-ant-... # For OpenClaw side only

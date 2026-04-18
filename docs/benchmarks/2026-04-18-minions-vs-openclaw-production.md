@@ -5,44 +5,44 @@
 **GBrain:** v0.11.0 (minions-jobs branch)
 **OpenClaw:** 2026.4.10
 **Brain:** 45,798 pages, 98K chunks, 25K links, 79K timeline entries
-**Task:** Pull and ingest one month of @garrytan tweets from the X Enterprise API
+**Task:** Pull and ingest one month of social posts from an external API into the brain
 
 ## Context
 
 This is a **production benchmark**, not a lab test. The existing lab benchmark
 ([2026-04-18-minions-vs-openclaw-subagents.md](2026-04-18-minions-vs-openclaw-subagents.md))
 uses trivial prompts on localhost Postgres. This benchmark uses a real 45K-page
-brain on Supabase, pulling real tweets from the X Enterprise API ($50K/mo
-firehose), and writing real brain pages.
+brain on Supabase, pulling real social posts from an external API, and writing
+real brain pages.
 
 ## The Task
 
-Pull @garrytan tweets for one month (May 2020), parse them into a structured
-brain page with frontmatter, engagement metrics, and links, commit to the
-brain repo, and submit a sync job to gbrain.
+Pull a month (May 2020) of my social posts from an external API, parse them
+into a structured brain page with frontmatter, engagement metrics, and
+links, commit to the brain repo, and submit a sync job to gbrain.
 
 ## Method 1: Minions (deterministic pipeline)
 
 ```bash
-# 1. Pull tweets from X API
-curl -s -H "Authorization: Bearer $X_BEARER_TOKEN" \
-  "https://api.x.com/2/tweets/search/all?query=from:garrytan&max_results=100&start_time=2020-05-01T00:00:00Z&end_time=2020-06-01T00:00:00Z&tweet.fields=created_at,public_metrics" \
-  > /tmp/bench-tweets.json
+# 1. Pull posts from the external API (curl → JSON)
+curl -s -H "Authorization: Bearer $API_BEARER_TOKEN" \
+  "$SOCIAL_API_URL?from=my_account&start=2020-05-01&end=2020-06-01" \
+  > /tmp/bench-posts.json
 
 # 2. Parse + write brain page (python)
 python3 parse_and_write.py
 
 # 3. Git commit
-cd /data/brain && git add media/x/garrytan/2020-05.md && git commit -m "x-archive: 2020-05"
+cd /data/brain && git add media/social/2020-05.md && git commit -m "archive: 2020-05"
 
 # 4. Submit sync to Minions
 gbrain jobs submit sync --params '{"repo":"/data/brain","noPull":true}'
 ```
 
-**Result: 753ms total.** 99 tweets pulled, page written, committed, sync job queued.
+**Result: 753ms total.** 99 posts pulled, page written, committed, sync job queued.
 
 Breakdown:
-- X API call: ~300ms
+- External API call: ~300ms
 - Python parse + write: ~50ms
 - Git commit: ~100ms
 - gbrain jobs submit: ~300ms
@@ -53,7 +53,7 @@ Cost: $0.00 (no LLM tokens)
 
 ```javascript
 sessions_spawn({
-  task: "Pull @garrytan tweets for June 2020 and save as a brain page...",
+  task: "Pull my social posts for June 2020 and save as a brain page...",
   model: "anthropic/claude-sonnet-4-20250514",
   mode: "run",
   runTimeoutSeconds: 120
@@ -93,7 +93,7 @@ When sub-agents DO successfully spawn (off-peak), the expected path is:
 
 ## The Scaling Story
 
-We pulled 19,240 tweets across 36 months (2021-2023) using the Minions
+We pulled 19,240 posts across 36 months (2021-2023) using the Minions
 approach in a single bash loop. Total time: ~15 minutes. Cost: $0.00 in
 LLM tokens.
 
@@ -121,6 +121,6 @@ its handlers are code, not models. The routing rule:
 
 ## One-Line Summary
 
-Minions completed a production tweet ingestion in 753ms for $0.
+Minions completed a production post-ingest pipeline in 753ms for $0.
 Sub-agents couldn't even spawn. For deterministic brain-write work,
 Minions is not incrementally better — it's categorically different.

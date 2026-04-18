@@ -166,7 +166,7 @@ A durable, Postgres-native job queue built into the brain. Every long-running ag
 
 ### The production numbers that matter
 
-Here's my personal OpenClaw deployment: one Render container. Supabase Postgres holding a 45,000-page brain. 19 cron jobs firing on schedule. The X Enterprise API on the wire. Real gateway load from real daily work. The task: pull a full month of my tweets and ingest them end-to-end into the brain as a structured page.
+Here's my personal OpenClaw deployment: one Render container. Supabase Postgres holding a 45,000-page brain. 19 cron jobs firing on schedule. Real gateway load from real daily work. The task: pull a month of my social posts from an external API and ingest them end-to-end into the brain as a structured page.
 
 |              | Minions   | `sessions_spawn`               |
 |---           |---        |---                             |
@@ -175,7 +175,7 @@ Here's my personal OpenClaw deployment: one Render container. Supabase Postgres 
 | Success rate | **100%**  | **0%** (couldn't even spawn)   |
 | Memory/job   | ~2 MB     | ~80 MB                         |
 
-Under that 19-cron load, sub-agent spawn couldn't clear the 10-second gateway wall. Minions landed it in under a second for zero tokens. **Scaling:** 19,240 tweets across 36 months, single bash loop, ~15 min total, $0.00. Sub-agents: ~9 min best case, ~$1.08 in tokens, ~40% spawn failure. **Lab:** durability ∞ (SIGKILL mid-flight, 10/10 rescued), throughput ~10× faster, fan-out ~21× with no failure wall, memory ~400× less.
+Under that 19-cron load, sub-agent spawn couldn't clear the 10-second gateway wall. Minions landed it in under a second for zero tokens. **Scaling:** 19,240 posts across 36 months, single bash loop, ~15 min total, $0.00. Sub-agents: ~9 min best case, ~$1.08 in tokens, ~40% spawn failure. **Lab:** durability ∞ (SIGKILL mid-flight, 10/10 rescued), throughput ~10× faster, fan-out ~21× with no failure wall, memory ~400× less.
 
 Full benchmarks: [production](docs/benchmarks/2026-04-18-minions-vs-openclaw-production.md) and [lab](docs/benchmarks/2026-04-18-minions-vs-openclaw-subagents.md).
 
@@ -184,7 +184,7 @@ Full benchmarks: [production](docs/benchmarks/2026-04-18-minions-vs-openclaw-pro
 > **Deterministic** (same input → same steps → same output) → **Minions**
 > **Judgment** (input requires assessment or decision) → **Sub-agents**
 
-Pull tweets, parse JSON, write a brain page, run a sync — deterministic. $0 tokens, survives restart, millisecond runtime. Triage the inbox, assess meeting priority, decide if a cold email deserves a reply — judgment. What sub-agents are actually good at. `minion_mode: pain_triggered` (the default) automates the routing.
+Pull posts, parse JSON, write a brain page, run a sync — deterministic. $0 tokens, survives restart, millisecond runtime. Triage the inbox, assess meeting priority, decide if a cold email deserves a reply — judgment. What sub-agents are actually good at. `minion_mode: pain_triggered` (the default) automates the routing.
 
 ### What's fixed
 
