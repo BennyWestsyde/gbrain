@@ -1,20 +1,28 @@
 /**
  * gbrain autopilot — Self-maintaining brain daemon.
  *
- * Runs: sync → extract → embed → backlinks fix in a continuous loop.
- * Health-based adaptive scheduling. Best-effort per step.
+ * v0.11.1 shape:
+ *   - Default path (minion_mode != off AND engine == postgres): spawn a
+ *     `gbrain jobs work` child process, submit ONE `autopilot-cycle` job
+ *     per interval with an idempotency_key so slow cycles don't stack up.
+ *     The forked worker drains the queue durably; restart with 10s backoff
+ *     on crash (5-crash cap → autopilot stops with a clear error).
+ *   - Fallback (minion_mode=off, PGLite, or `--inline`): run sync →
+ *     extract → embed inline, same as pre-v0.11.1 behavior.
  *
  * Usage:
- *   gbrain autopilot [--repo <path>] [--interval N] [--json]
+ *   gbrain autopilot [--repo <path>] [--interval N] [--json] [--inline]
  *   gbrain autopilot --install [--repo <path>]
  *   gbrain autopilot --uninstall
  *   gbrain autopilot --status [--json]
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, utimesSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { execSync } from 'child_process';
+import { execSync, spawn, type ChildProcess } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
+import { loadPreferences } from '../core/preferences.ts';
+import { loadConfig } from '../core/config.ts';
 
 function parseArg(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -31,6 +39,35 @@ function logError(phase: string, e: unknown) {
     mkdirSync(logDir, { recursive: true });
     appendFileSync(join(logDir, 'autopilot.log'), line + '\n');
   } catch { /* best-effort */ }
+}
+
+/**
+ * Resolve the gbrain CLI entrypoint for spawning the worker child.
+ *
+ * Codex caught the bug in earlier plan drafts: `process.execPath` is the
+ * Bun (or Node) runtime binary on source installs, not `gbrain`. Blindly
+ * using it would spawn `bun jobs work`, which does not work.
+ *
+ * Order of resolution:
+ *   1. argv[1] if it clearly points at a gbrain entry (cli.ts or /gbrain).
+ *   2. process.execPath when running as the compiled binary.
+ *   3. `which gbrain` for installs where the binary is on $PATH.
+ *   4. Throw — nothing on $PATH, no way to supervise the worker.
+ */
+export function resolveGbrainCliPath(): string {
+  const arg1 = process.argv[1] ?? '';
+  if (arg1.endsWith('/gbrain') || arg1.endsWith('/cli.ts') || arg1.endsWith('\\gbrain.exe')) {
+    return arg1;
+  }
+  const exec = process.execPath ?? '';
+  if (exec.endsWith('/gbrain') || exec.endsWith('\\gbrain.exe')) {
+    return exec;
+  }
+  try {
+    const which = execSync('which gbrain', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (which) return which;
+  } catch { /* not on $PATH */ }
+  throw new Error('Could not resolve the gbrain CLI path. Install gbrain so it is on $PATH, or run autopilot from the compiled binary directly.');
 }
 
 export async function runAutopilot(engine: BrainEngine, args: string[]) {
@@ -55,6 +92,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   const repoPath = parseArg(args, '--repo') || await engine.getConfig('sync.repo_path');
   const baseInterval = parseInt(parseArg(args, '--interval') || '300', 10);
   const jsonMode = args.includes('--json');
+  const forceInline = args.includes('--inline');
 
   if (!repoPath) {
     console.error('No repo path. Use --repo or run gbrain sync --repo first.');
@@ -79,18 +117,79 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
 
   console.log(`Autopilot starting. Repo: ${repoPath}, interval: ${baseInterval}s`);
 
-  // Signal handling + lock cleanup
+  // Mode resolution: Minions dispatch when the user has opted in AND the
+  // worker daemon can actually run (Postgres only; PGLite's exclusive file
+  // lock blocks a separate worker process).
+  const mode = loadPreferences().minion_mode ?? 'pain_triggered';
+  const cfg = loadConfig();
+  const engineType = cfg?.engine ?? 'pglite';
+  const useMinionsDispatch = mode !== 'off' && engineType === 'postgres' && !forceInline;
+
   let stopping = false;
-  const cleanup = () => { try { require('fs').unlinkSync(lockPath); } catch {} };
-  process.on('exit', cleanup);
-  process.on('SIGTERM', () => { stopping = true; console.log('Autopilot stopping (SIGTERM).'); });
-  process.on('SIGINT', () => { stopping = true; console.log('Autopilot stopping (SIGINT).'); });
+  let workerProc: ChildProcess | null = null;
+  let crashCount = 0;
+
+  if (useMinionsDispatch) {
+    const cliPath = resolveGbrainCliPath();
+    const startWorker = () => {
+      const child = spawn(cliPath, ['jobs', 'work'], { stdio: 'inherit', env: process.env });
+      workerProc = child;
+      console.log(`[autopilot] Minions worker spawned (pid: ${child.pid})`);
+      child.on('exit', (code) => {
+        workerProc = null;
+        if (stopping) return;
+        if (crashCount >= 5) {
+          console.error('[autopilot] 5 consecutive worker crashes, giving up.');
+          process.exit(1);
+        }
+        crashCount++;
+        console.error(`[autopilot] worker exited code=${code}, restart #${crashCount} in 10s`);
+        setTimeout(startWorker, 10_000);
+      });
+    };
+    startWorker();
+  } else {
+    const why = mode === 'off' ? 'minion_mode=off'
+      : (engineType !== 'postgres' ? 'engine=pglite' : 'flag=--inline');
+    console.log(`[autopilot] running steps inline (${why})`);
+  }
+
+  // Async shutdown with 35s drain window for the worker child. The worker
+  // has its own SIGTERM handler (minions/worker.ts:79-85) that drains
+  // in-flight jobs for up to 30s before exit. We give it 35s here to
+  // account for signal-delivery latency, then SIGKILL as a last resort.
+  //
+  // No `process.on('exit')` handler — its callback runs synchronously and
+  // cannot await the worker's drain.
+  const shutdown = async (sig: string) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`Autopilot stopping (${sig}).`);
+    if (workerProc) {
+      try { workerProc.kill('SIGTERM'); } catch { /* already dead */ }
+      await Promise.race([
+        new Promise<void>(r => workerProc!.once('exit', () => r())),
+        new Promise<void>(r => setTimeout(() => r(), 35_000)),
+      ]);
+      if (workerProc && !workerProc.killed) {
+        try { workerProc.kill('SIGKILL'); } catch { /* already dead */ }
+      }
+    }
+    try { unlinkSync(lockPath); } catch { /* already gone */ }
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.on('SIGINT',  () => { void shutdown('SIGINT'); });
 
   let consecutiveErrors = 0;
 
   while (!stopping) {
     const cycleStart = Date.now();
     let cycleOk = true;
+
+    // Refresh the lock mtime so another cron-fired autopilot doesn't
+    // declare the instance stale after 10 minutes (Codex C).
+    try { utimesSync(lockPath, new Date(), new Date()); } catch { /* best-effort */ }
 
     // DB health check (reconnect if needed)
     try {
@@ -102,28 +201,57 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       } catch (e) { logError('reconnect', e); }
     }
 
-    // 1. Sync
-    try {
-      const { performSync } = await import('./sync.ts');
-      const result = await performSync(engine, { repoPath, noEmbed: true });
-      if (result.status === 'synced') {
-        console.log(`[sync] +${result.added} ~${result.modified} -${result.deleted}`);
-      }
-    } catch (e) { logError('sync', e); cycleOk = false; }
+    if (useMinionsDispatch) {
+      // Submit ONE autopilot-cycle job per cycle slot. The idempotency key
+      // dedupes overrun submissions — if a cycle's job runs longer than
+      // the interval, the next submission is a no-op at the DB layer
+      // (ON CONFLICT DO NOTHING on the unique partial index).
+      try {
+        const { MinionQueue } = await import('../core/minions/queue.ts');
+        const queue = new MinionQueue(engine);
+        const slotMs = Math.floor(Date.now() / (baseInterval * 1000)) * baseInterval * 1000;
+        const slot = new Date(slotMs).toISOString();
+        const timeoutMs = Math.max(baseInterval * 2 * 1000, 300_000);
+        const job = await queue.add('autopilot-cycle',
+          { repoPath },
+          {
+            queue: 'default',
+            idempotency_key: `autopilot-cycle:${slot}`,
+            max_attempts: 2,
+            timeout_ms: timeoutMs,
+          },
+        );
+        if (jsonMode) {
+          process.stderr.write(JSON.stringify({ event: 'dispatched', job_id: job.id, slot }) + '\n');
+        } else {
+          console.log(`[dispatch] job #${job.id} autopilot-cycle slot=${slot}`);
+        }
+      } catch (e) { logError('dispatch', e); cycleOk = false; }
+    } else {
+      // Inline fallback — same as pre-v0.11.1 behavior.
+      // 1. Sync
+      try {
+        const { performSync } = await import('./sync.ts');
+        const result = await performSync(engine, { repoPath, noEmbed: true });
+        if (result.status === 'synced') {
+          console.log(`[sync] +${result.added} ~${result.modified} -${result.deleted}`);
+        }
+      } catch (e) { logError('sync', e); cycleOk = false; }
 
-    // 2. Extract (full brain, incremental dedup handles repeats)
-    try {
-      const { runExtract } = await import('./extract.ts');
-      await runExtract(engine, ['all', '--dir', repoPath]);
-    } catch (e) { logError('extract', e); cycleOk = false; }
+      // 2. Extract (full brain, incremental dedup handles repeats)
+      try {
+        const { runExtractCore } = await import('./extract.ts');
+        await runExtractCore(engine, { mode: 'all', dir: repoPath });
+      } catch (e) { logError('extract', e); cycleOk = false; }
 
-    // 3. Embed stale
-    try {
-      const { runEmbed } = await import('./embed.ts');
-      await runEmbed(engine, ['--stale']);
-    } catch (e) { logError('embed', e); cycleOk = false; }
+      // 3. Embed stale
+      try {
+        const { runEmbedCore } = await import('./embed.ts');
+        await runEmbedCore(engine, { stale: true });
+      } catch (e) { logError('embed', e); cycleOk = false; }
+    }
 
-    // 4. Health check + adaptive interval
+    // 4. Health check + adaptive interval (same for both paths)
     let interval = baseInterval;
     try {
       const health = await engine.getHealth();
@@ -147,7 +275,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       consecutiveErrors++;
       if (consecutiveErrors >= 5) {
         console.error('5 consecutive cycle failures. Stopping autopilot.');
-        process.exit(1);
+        void shutdown('cycle-failure-cap');
+        break;
       }
     }
 
