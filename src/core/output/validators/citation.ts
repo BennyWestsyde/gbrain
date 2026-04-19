@@ -25,7 +25,10 @@
 
 import type { PageValidator, PageValidationContext, ValidationFinding } from '../writer.ts';
 
-const CITATION_RE = /\[Source:[^\]]*\]|\]\(\s*https?:\/\/[^)]+\)/i;
+// `[Source: ...]` must carry non-whitespace content — a bare `[Source:]`
+// or `[Source:   ]` is decorative and does not satisfy the citation check.
+// The URL form `](https://...)` already requires a non-empty scheme+host.
+const CITATION_RE = /\[Source:\s*\S[^\]]*\]|\]\(\s*https?:\/\/[^)]+\)/i;
 
 export const citationValidator: PageValidator = {
   id: 'citation',

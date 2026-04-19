@@ -470,6 +470,17 @@ describe('citation validator', () => {
     expect(findings).toEqual([]);
   });
 
+  test('empty [Source:] marker does NOT satisfy citation check', async () => {
+    const findings = await run('Alice raised $5M in Series A from Sequoia [Source:].');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].validator).toBe('citation');
+  });
+
+  test('whitespace-only [Source:   ] marker does NOT satisfy citation check', async () => {
+    const findings = await run('Alice raised $5M in Series A from Sequoia [Source:   ].');
+    expect(findings).toHaveLength(1);
+  });
+
   test('splitParagraphs handles blank-line separation', () => {
     const input = 'First para.\n\nSecond para.';
     const out = splitParagraphs(input);
