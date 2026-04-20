@@ -1,6 +1,6 @@
 {
   "name": "gbrain",
-  "version": "0.13.1",
+  "version": "0.15.0",
   "description": "Postgres-native personal knowledge brain with hybrid RAG search",
   "type": "module",
   "main": "src/core/index.ts",
@@ -22,7 +22,7 @@
     "build:schema": "bash scripts/build-schema.sh",
     "test": "scripts/check-jsonb-pattern.sh && bun test",
     "test:e2e": "bun test test/e2e/",
-    "test:eval": "bun test eval/runner/queries/validator.test.ts eval/runner/adapters/ eval/generators/world-html.test.ts",
+    "test:eval": "bun test eval/runner/queries/validator.test.ts eval/runner/adapters/ eval/generators/world-html.test.ts test/eval/",
     "check:jsonb": "scripts/check-jsonb-pattern.sh",
     "eval:run": "bun eval/runner/multi-adapter.ts",
     "eval:run:dev": "BRAINBENCH_N=1 bun eval/runner/multi-adapter.ts",
@@ -31,6 +31,8 @@
     "eval:query:validate": "bun eval/cli/query-validate.ts",
     "eval:query:new": "bun eval/cli/query-new.ts",
     "eval:type-accuracy": "bun eval/runner/type-accuracy.ts",
+    "eval:generate-amara-life": "bun eval/generators/amara-life-gen.ts",
+    "eval:generate-amara-life:dry": "bun eval/generators/amara-life-gen.ts --dry-run",
     "postinstall": "gbrain --version >/dev/null 2>&1 && gbrain apply-migrations --yes --non-interactive 2>/dev/null || true",
     "prepublish:clawhub": "bun run build:all",
     "publish:clawhub": "clawhub package publish . --family bundle-plugin"
