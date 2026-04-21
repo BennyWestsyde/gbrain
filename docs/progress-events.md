@@ -2,7 +2,7 @@
 
 Canonical reference for the JSONL progress stream that `gbrain` writes to
 `stderr` when a bulk command runs with `--progress-json`. Stable from
-v0.14.2. Additive changes only; no renames or removals without a major
+v0.15.2. Additive changes only; no renames or removals without a major
 version bump.
 
 Most humans won't read this page. Agents parsing progress will.
@@ -131,7 +131,7 @@ Phases use `snake_case.dot.path` naming. A fresh reporter starts at the
 root; `child()` composition appends to the parent's current phase, so a
 sync that calls import emits `sync.import.<file>`, not `import.<file>`.
 
-Stable phase names shipped in v0.14.2:
+Stable phase names shipped in v0.15.2:
 
 - `doctor.db_checks` (umbrella for all DB-side doctor checks)
 - `orphans.scan`

@@ -11,7 +11,7 @@
  *   json: emit one JSON object per line (see schema below)
  *   quiet: no output
  *
- * JSON event schema (stable from v0.14.2, additive only):
+ * JSON event schema (stable from v0.15.2, additive only):
  *   {"event":"start","phase":"<snake.dot.path>","total"?:N,"ts":"<iso>"}
  *   {"event":"tick","phase":"...","done":N,"total"?:N,"pct"?:F,"elapsed_ms":N,"eta_ms"?:N,"ts":"..."}
  *   {"event":"heartbeat","phase":"...","note":"<str>","elapsed_ms":N,"ts":"..."}

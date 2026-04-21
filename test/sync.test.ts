@@ -196,7 +196,7 @@ describe('sync regression — #132 nested transaction deadlock', () => {
     const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
     // Accept either of the historical loop shapes: the original inline
     // `for (const path of [...filtered.added, ...filtered.modified])` or
-    // the v0.14.2 progress-wrapped variant where the list is hoisted into
+    // the v0.15.2 progress-wrapped variant where the list is hoisted into
     // a local `addsAndMods` variable first.
     const inlineIdx = source.indexOf('for (const path of [...filtered.added, ...filtered.modified]');
     const hoistedIdx = source.indexOf('const addsAndMods = [...filtered.added, ...filtered.modified]');

@@ -376,7 +376,7 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
   // v0.12.0's JSON.stringify()::jsonb pattern stored JSONB string literals
   // instead of objects on real Postgres. PGLite masked this; Supabase did not.
   // Scan 5 known write sites for rows whose top-level jsonb_typeof is
-  // 'string'. `page_versions.frontmatter` added in v0.14.2 so doctor's
+  // 'string'. `page_versions.frontmatter` added in v0.15.2 so doctor's
   // surface matches `repair-jsonb` (the previous 4-target scan missed a
   // repair target, per #254/Codex review).
   progress.heartbeat('jsonb_integrity');

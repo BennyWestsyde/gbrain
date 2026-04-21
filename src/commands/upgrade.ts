@@ -56,9 +56,9 @@ export async function runUpgrade(args: string[]) {
     // Save old version for post-upgrade migration detection
     saveUpgradeState(oldVersion, newVersion);
     // Run post-upgrade feature discovery (reads migration files from the NEW binary).
-    // Timeout bumped 300s → 1800s (30 min) in v0.14.2 because v0.12.0 graph
+    // Timeout bumped 300s → 1800s (30 min) in v0.15.2 because v0.12.0 graph
     // backfill on 50K+ brains regularly exceeded the old ceiling. The heartbeat
-    // wiring added in v0.14.2 makes the long wait observable; a hard 300s
+    // wiring added in v0.15.2 makes the long wait observable; a hard 300s
     // cap would still kill legit migrations mid-run. Override via
     // GBRAIN_POST_UPGRADE_TIMEOUT_MS env var.
     const postUpgradeTimeoutMs = Number(

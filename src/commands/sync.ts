@@ -242,7 +242,7 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   // trigger the outer wrap. Per-file atomicity is also the right granularity:
   // one file's failure should not roll back the others' successful imports.
   //
-  // v0.14.2: per-file progress on stderr via the shared reporter.
+  // v0.15.2: per-file progress on stderr via the shared reporter.
   // Bug 9: per-file failures captured in `failedFiles` so the caller can
   // gate `sync.last_commit` advancement and record recoverable errors.
   const failedFiles: Array<{ path: string; error: string; line?: number }> = [];
