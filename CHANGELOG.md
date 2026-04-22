@@ -363,7 +363,7 @@ If you connect via `aws-0-REGION.pooler.supabase.com:6543`, do nothing. The upgr
 - Extended `test/postgres-engine.test.ts` — new source-level grep assertion that the worker-instance `connect({poolSize})` branch calls `db.resolvePrepare(url)` and conditionally includes the `prepare` key in the options literal. Mirrors the existing `SET LOCAL statement_timeout` guardrail in the same file. If anyone rips out the wiring, the build fails before a shipping brain drops rows.
 
 **Supersedes**
-- Closes #284 (ours, Wintermute): architecture landed as-is (port-only detection, no hostname expansion). Tests rewritten from vitest to bun:test.
+- Closes #284 (ours, from the OpenClaw reference deployment): architecture landed as-is (port-only detection, no hostname expansion). Tests rewritten from vitest to bun:test.
 - Closes #286 (ours, Codex one-liner): dominated; unconditional `prepare: false` would have cost direct-Postgres users plan caching for no reason.
 - Closes #270 (@notjbg): the critical both-connection-paths insight landed; credit preserved in commit trailer and this CHANGELOG entry.
 
