@@ -102,7 +102,11 @@ describeE2E('v0.18.0 multi-source — Postgres schema shape (fresh install)', ()
       `SELECT column_name FROM information_schema.columns
         WHERE table_name = 'files' AND column_name IN ('source_id', 'page_id')`,
     );
-    const names = new Set((cols as { column_name: string }[]).map(r => r.column_name));
+    // postgres.js returns RowList with an iterable-row shape; cast via
+    // unknown before narrowing to plain objects (TS2352 otherwise).
+    const names = new Set(
+      (cols as unknown as Array<{ column_name: string }>).map(r => r.column_name),
+    );
     expect(names.has('source_id')).toBe(true);
     expect(names.has('page_id')).toBe(true);
   });
