@@ -1,0 +1,34 @@
+{
+  "name": "@garrytan/openclaw-gbrain",
+  "version": "0.1.0",
+  "description": "GBrain knowledge brain plugin for OpenClaw — semantic search, entity resolution, relationship graph for markdown repos",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --external:openclaw --external:postgres --external:openai --external:@electric-sql/pglite --external:pgvector --external:gray-matter --external:marked --external:@anthropic-ai/sdk --external:@aws-sdk/client-s3 --external:@modelcontextprotocol/sdk --minify-whitespace",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  },
+  "license": "MIT",
+  "author": "Garry Tan"
+}

@@ -1,0 +1,37 @@
+{
+  "id": "gbrain",
+  "name": "GBrain",
+  "version": "0.1.0",
+  "description": "Personal knowledge brain for OpenClaw — semantic search, entity resolution, relationship graph, and enrichment for markdown repos",
+  "main": "dist/index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "databaseUrl": {
+        "type": "string",
+        "description": "PostgreSQL connection URL (with pgvector extension)",
+        "uiHints": { "sensitive": true }
+      },
+      "brainPath": {
+        "type": "string",
+        "description": "Path to the markdown knowledge repository",
+        "default": "./brain"
+      },
+      "openaiApiKey": {
+        "type": "string",
+        "description": "OpenAI API key for embeddings (falls back to OPENAI_API_KEY env)",
+        "uiHints": { "sensitive": true }
+      },
+      "autoSync": {
+        "type": "boolean",
+        "description": "Watch brainPath for git changes and auto-reindex",
+        "default": true
+      },
+      "syncIntervalSeconds": {
+        "type": "number",
+        "description": "Poll interval for git HEAD changes",
+        "default": 30
+      }
+    }
+  }
+}
