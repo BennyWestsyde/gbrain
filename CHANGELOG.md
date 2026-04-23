@@ -2,12 +2,17 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.17.0] - 2026-04-22
+## [0.19.0] - 2026-04-22
 
 ## **Every skill. Every check. Every install. One command each.**
 ## **The essay's "skillify it!" promise ships end-to-end. Your OpenClaw now learns, for real.**
 
-Three months ago the essay at `x.com/garrytan/status/2046876981711769720` put GBrain on the hook for a 10-step "skillify" loop: every failure becomes a SKILL.md, every skill has evals, every eval runs daily, the bug becomes structurally impossible to repeat. The PR #326 fallback was the first step. v0.17.0 finishes the walk. All five remaining workstreams land in one release.
+> **Version note:** v0.17.0 + v0.18.0 shipped on master while this release was
+> in review (gbrain dream + multi-source brains). The skillify workstream
+> lands as v0.19.0 to avoid the collision; it is the natural continuation
+> of PR #326 (v0.16.4's skills-dir fallback).
+
+Three months ago the essay at `x.com/garrytan/status/2046876981711769720` put GBrain on the hook for a 10-step "skillify" loop: every failure becomes a SKILL.md, every skill has evals, every eval runs daily, the bug becomes structurally impossible to repeat. The PR #326 fallback was the first step. v0.19.0 finishes the walk. All five remaining workstreams land in one release.
 
 **Check 5 (trigger routing eval) ships.** Add a `routing-eval.jsonl` file next to any skill and `gbrain check-resolvable` evaluates it structurally on every run. `{intent, expected_skill, ambiguous_with?}` per line. Layer A runs always; ambiguous results get flagged. A dedicated `gbrain routing-eval` verb stays available for CI gating. The D-CX-6 fixture linter blocks tautological "intent is the trigger" fixtures.
 
@@ -23,21 +28,21 @@ Three months ago the essay at `x.com/garrytan/status/2046876981711769720` put GB
 
 Six pre-v0.17 blockers for the reference OpenClaw deployment, measured live against `~/git/<redacted>/workspace` (107 skills, `AGENTS.md` at workspace root, no `manifest.json`):
 
-| What | Before v0.17 | After v0.17 |
+| What | Before v0.19 | After v0.19 |
 |---|---|---|
 | `gbrain check-resolvable` (no flags) | `RESOLVER.md not found`, exit 2 | detects 102 skills, 15 errors, 108 warnings, exit 1 |
 | AGENTS.md-only workspace support | ✗ (ship blocker) | ✓ (W1 + auto-manifest) |
 | Check 5 routing eval | `DEFERRED` in source | Structural layer default, LLM layer --llm |
-| Check 6 brain filing | `DEFERRED` in source | Warning-only audit (v0.18 elevates to error) |
+| Check 6 brain filing | `DEFERRED` in source | Warning-only audit (v0.20 elevates to error) |
 | `gbrain skillify` command | didn't exist | `{scaffold, check}` namespace |
 | `gbrain skillpack install` | didn't exist | `{list, install, diff}` with deps closure + lockfile |
-| Tests across v0.17 surface | 0 | 215 (unit) + 160 (E2E) |
+| Tests across v0.19 surface | 0 | 215 (unit) + 160 (E2E) |
 
 The essay's "first run found 6 unreachable skills out of 40+" finding reproduces exactly. First run against the reference workspace surfaces 15 unreachable skills out of 102. ~15% dark. Fix them one by one, re-run, green.
 
 **TTHW (time to hello world) for the full skillify loop on a fresh skill:**
 
-| Human team | CC + gstack + v0.17 |
+| Human team | CC + gstack + v0.19 |
 |---|---|
 | ~1 week (SKILL.md + tests + evals + resolver row + audit passes) | ~30 min (`skillify scaffold` + fill in the real parts + `check-resolvable`) |
 
@@ -57,13 +62,13 @@ Five commands, four of them take <1 second. The magic word from the essay finall
 
 For downstream OpenClaw deployments: `gbrain skillpack install --all` drops the 25 curated skills into your `$OPENCLAW_WORKSPACE`. Per-file diff protection keeps your local edits safe. The managed block in your AGENTS.md tells you exactly what gbrain installed.
 
-## To take advantage of v0.17.0
+## To take advantage of v0.19.0
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
 1. **Verify the binary upgraded:**
    ```bash
-   gbrain --version   # should say 0.17.0
+   gbrain --version   # should say 0.19.0
    ```
 2. **Verify the new primitives exist:**
    ```bash
@@ -78,13 +83,13 @@ For downstream OpenClaw deployments: `gbrain skillpack install --all` drops the 
    gbrain check-resolvable --verbose    # errors block CI; warnings are advisory
    gbrain check-resolvable --strict     # warnings also block (CI opt-in)
    ```
-4. **For gbrain skills you author:** add `routing-eval.jsonl` fixtures and `writes_pages: true` + `writes_to:` frontmatter as you touch each skill. Warning-only in v0.17; error in v0.18.
+4. **For gbrain skills you author:** add `routing-eval.jsonl` fixtures and `writes_pages: true` + `writes_to:` frontmatter as you touch each skill. Warning-only in v0.19; error in v0.20.
 5. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with:
    - `gbrain doctor` output
    - `gbrain check-resolvable --json`
    - which step broke
 
-No manual schema migration. v0.17 is a pure code + docs release; existing brains work unchanged.
+No manual schema migration. v0.19 is a pure code + docs release; existing brains work unchanged.
 
 ### Itemized changes
 
@@ -93,12 +98,225 @@ No manual schema migration. v0.17 is a pure code + docs release; existing brains
 - **W2 — Check 5 routing eval:** new `src/core/routing-eval.ts` harness (normalization, trigger extraction, structural match with always-on exemption, fixture linter, JSONL loader). New `src/commands/routing-eval.ts` CLI verb. Wired into `check-resolvable` default. Seed fixtures in `skills/query/routing-eval.jsonl` and `skills/citation-fixer/routing-eval.jsonl`.
 - **W3 — Check 6 brain filing:** new `skills/_brain-filing-rules.json` (canonical rules). New `src/core/filing-audit.ts`. New `writes_pages: true` frontmatter field (D-CX-7, distinct from `mutating`). Seeded on brain-ops, enrich, ingest, idea-ingest, media-ingest, meeting-ingestion, signal-detector.
 - **W4 — skillify subcommand namespace:** new `src/core/skillify/{templates, generator}.ts`. New `src/commands/skillify.ts` (top-level dispatcher + scaffold handler). Promoted `scripts/skillify-check.ts` to `src/commands/skillify-check.ts` (D-CX-2); legacy script stays as a shim. D-CX-9 SKILLIFY_STUB sentinel detected by `check-resolvable`. D-CX-7 idempotent resolver row append. `skills/skillify/SKILL.md` rewritten to orchestrate the full 10-step loop.
-- **W5 — skillpack install:** `openclaw.plugin.json` bumped 0.4.1 → 0.17.0, 7 skills → 25, added `shared_deps` + `excluded_from_install`. New `src/core/skillpack/{bundle, installer}.ts`. New `src/commands/skillpack.ts` subcommand dispatcher (list, install, diff, check). Per-file diff protection, `--overwrite-local`, `--dry-run`, file-lock via `.gbrain-skillpack.lock`, atomic managed-block update (D-CX-10, D-CX-11).
+- **W5 — skillpack install:** `openclaw.plugin.json` bumped 0.4.1 → 0.19.0, 7 skills → 25, added `shared_deps` + `excluded_from_install`. New `src/core/skillpack/{bundle, installer}.ts`. New `src/commands/skillpack.ts` subcommand dispatcher (list, install, diff, check). Per-file diff protection, `--overwrite-local`, `--dry-run`, file-lock via `.gbrain-skillpack.lock`, atomic managed-block update (D-CX-10, D-CX-11).
 - **Privacy guard:** new `scripts/check-privacy.sh` (CLAUDE.md:550 enforcement). Scrubbed stray references in CHANGELOG:366 and 2 test files.
 - **E2E fixture:** new `test/fixtures/openclaw-reference-minimal/` (4 skills + AGENTS.md at workspace root). `test/e2e/openclaw-reference-compat.test.ts` exercises the full W1..W5 stack against it. `test/regression-v0_16_4.test.ts` guards v0.16.4 baseline against surprise new warnings (F-ENG-8). `test/skillpack-sync-guard.test.ts` asserts plugin manifest ⊂ skills manifest (F-ENG-4).
 - **Tests added:** 215 new cases across 13 new + modified test files. All 2156 unit tests pass, all E2E tests pass (152 Tier 1 + 3 Tier 2 + 8 new fixture cases).
 
 Planning + reviews: `~/.claude/plans/p1-lets-just-vast-blanket.md` has the full CEO + DX + Eng + Codex-outside-voice reviews with every decision traced.
+
+---
+
+## [0.18.0] - 2026-04-22
+
+## **Multi-source brains. One database, many repos. Federated or isolated, you choose.**
+## **`gbrain sources` is the new subcommand. `.gbrain-source` is the new dotfile.**
+
+A single gbrain database can now hold multiple knowledge repos — your wiki, your gstack checkout, your yc-media pipeline, your garrys-list essays — with clean scoping per source. Slugs are unique per source, not globally, so two sources can both have `topics/ai` and they are different pages. Every page, every file, every ingest_log row is scoped to a `sources(id)` row.
+
+Per-source federation controls whether a source participates in unqualified default search. `federated=true` is cross-recall (your wiki + gstack both show up when you search "retry budgets"). `federated=false` is isolation (your yc-media content never leaks into your personal writing searches). Flip with `gbrain sources federate <id>` / `unfederate <id>`.
+
+Per-directory default via `.gbrain-source` dotfile walk-up + `GBRAIN_SOURCE` env var. Same mental model as kubectl / terraform / git: `cd ~/yc-media && gbrain query "X"` just works, no `--source` flag needed. Resolution priority: explicit flag > env > dotfile > registered-path-longest-prefix > `sources.default` config > literal `default` fallback.
+
+### The numbers that matter
+
+9 bisectable commits. 4 new schema migrations. ~85 new tests. Full suite: 2063 pass / 17 fail (the 17 pre-existing master timeouts unchanged). Migration chain runs end-to-end against real PGLite in under 1 second for the integration test.
+
+| Metric | BEFORE v0.17 | AFTER v0.18 | Δ |
+|---|---|---|---|
+| Max repos per brain | 1 | unlimited | unbounded |
+| Slug uniqueness | global | per-source | composite |
+| Multi-source search | impossible | default (for federated) | native |
+| New CLI commands | — | 9 (`sources add/list/remove/rename/default/attach/detach/federate/unfederate`) | +9 |
+| Schema migrations shipped | 0 new | 4 (v20-v23) | +4 |
+| New unit + integration tests | — | ~85 | +85 |
+
+### What this means for agents
+
+When a brain has multiple sources, every search result carries `source_id`. Agents cite in `[source-id:slug]` form — `[wiki:topics/ai]` or `[gstack:plans/retry-policy]` — so the user can trace which repo each fact came from. The citation key is `sources.id` (immutable), so renaming a source's display name via `gbrain sources rename` never breaks existing citations.
+
+Back-compat is total. Pre-v0.18 brains upgrade into a seeded `default` source with `federated=true`, and their existing code paths target `default` via a schema DEFAULT clause. You literally do not have to change anything to upgrade; you only change things if you want to add a second source.
+
+## To take advantage of v0.18.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor`
+warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Your agent reads `skills/migrations/v0.18.0.md` the next time you interact with it.** The migration chain is fully mechanical (v20 creates the sources table, v21 adds pages.source_id + composite UNIQUE, v22 adds links.resolution_type, v23 adds files.source_id + page_id + file_migration_ledger). No manual data work needed.
+3. **Verify the outcome:**
+   ```bash
+   gbrain sources list     # should show 'default' federated, with your existing page count
+   gbrain stats            # existing behavior unchanged
+   gbrain doctor
+   ```
+4. **To start using multi-source:**
+   ```bash
+   gbrain sources add gstack --path ~/.gstack --no-federated
+   cd ~/.gstack && gbrain sources attach gstack
+   gbrain sync --source gstack
+   ```
+5. **If any step fails or the numbers look wrong,** please file an issue: https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+### Itemized changes
+
+#### Added
+
+- **`gbrain sources` subcommand group** — add, list, remove, rename, default, attach, detach, federate, unfederate. See `docs/guides/multi-source-brains.md` for three canonical scenarios (unified wiki+gstack / purpose-separated yc-media+garrys-list / mixed).
+- **`sources` table** — first-class multi-repo primitive. `(id, name, local_path, last_commit, last_sync_at, config)`. Citation key is `sources.id`, immutable, validated `[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?`.
+- **`pages.source_id` column + composite UNIQUE (source_id, slug)** — slugs unique per source. DEFAULT 'default' on the column so existing single-source callers target the default source automatically via schema default.
+- **`.gbrain-source` dotfile** — walk-up resolution like kubectl/terraform/git. `gbrain sources attach <id>` writes it in CWD. Auto-selects the source for any command run from that directory or any subdirectory.
+- **`GBRAIN_SOURCE` env var** — power-user / CI / script escape hatch. Second highest priority in resolution (after explicit `--source <id>`).
+- **Qualified wikilink syntax `[[source:slug]]`** — new in v0.18 extractor. Unqualified `[[slug]]` still resolves via local-first fallback. `links.resolution_type ENUM('qualified','unqualified')` records which kind each edge is for future `gbrain extract --refresh-unqualified` re-resolution.
+- **`files.source_id` + `files.page_id`** — files now scope per source + reference pages by id (not slug). `file_migration_ledger` drives the S3/Supabase object rewrite under the pending → copy_done → db_updated → complete state machine.
+- **`gbrain sync --source <id>`** — per-source sync reads local_path + last_commit from the sources table, writes last_sync_at back. Single-source brains keep using the pre-v0.17 `sync.repo_path` / `sync.last_commit` config keys unchanged.
+
+#### Changed
+
+- **Search dedup is now source-aware.** Pre-v0.18 keyed on slug alone; under composite uniqueness that would collapse two same-slug pages in different sources. `pageKey(r) = source_id:slug` is the one canonical helper across all four dedup layers + compiled-truth guarantee. Codex review flagged this as regression-critical.
+- **`SearchResult.source_id` optional field** — populated by engine SELECT JOINs. Falls back to `'default'` for pre-v0.18 rows that lacked the column.
+- **Migration runner sorts by version** — if anyone adds a migration out of order in `MIGRATIONS[]`, the sort guards against silent skips.
+
+#### Migrations
+
+- **v20** `sources_table_additive` — additive-only. Creates sources table + seeds default row with `{"federated": true}`. Inherits existing `sync.repo_path` / `sync.last_commit`.
+- **v21** `pages_source_id_composite_unique` — adds `pages.source_id` with DEFAULT, swaps global `UNIQUE(slug)` for composite `UNIQUE(source_id, slug)`. Lands atomically with the engine's `ON CONFLICT (source_id, slug)` rewrite.
+- **v22** `links_resolution_type` — adds `links.resolution_type` CHECK column.
+- **v23** `files_source_id_page_id_ledger` — Postgres-only (PGLite has no files table). Adds `files.source_id` + `files.page_id`, backfills `page_id` from legacy `page_slug`, creates `file_migration_ledger`.
+
+#### Tests
+
+- `test/sources.test.ts` (14 tests) — CLI dispatcher, validation, overlapping-path guard.
+- `test/source-resolver.test.ts` (14 tests) — full 6-priority resolution coverage including longest-prefix match.
+- `test/storage-backfill.test.ts` (13 tests) — state machine + 3 crash-point recovery tests (Codex flagged each).
+- `test/multi-source-integration.test.ts` (16 tests) — end-to-end against real PGLite, migration chain v2→v23.
+- `test/link-extraction.test.ts` (+6) — qualified `[[source:slug]]` parsing + masking + v22 structural.
+- `test/dedup.test.ts` (+4) — regression-critical source-aware composite key tests.
+- `test/migrate.test.ts` (+18) — v20/v21/v22/v23 structural assertions.
+
+#### Docs
+
+- `docs/guides/multi-source-brains.md` — new getting-started guide (federated / isolated / mixed scenarios).
+- `skills/migrations/v0.18.0.md` — agent-facing migration skill.
+- `skills/brain-ops/SKILL.md` — new "Cross-source citation format" section.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+## [0.17.0] - 2026-04-22
+
+## **`gbrain dream`. Run the brain maintenance cycle while you sleep.**
+## **One primitive, two CLIs. Autopilot gains lint + orphan sweep automatically.**
+
+The README has promised "the dream cycle" for a year. v0.17 makes it real as a first-class command. `gbrain dream` runs one maintenance cycle and exits, designed for cron. Same six phases as `gbrain autopilot` — they both delegate to the new `runCycle` primitive in `src/core/cycle.ts`. One source of truth for what your brain does overnight.
+
+Phase order is semantically driven: **fix files first, then index them**. Lint and backlinks write to disk. Sync picks them up into the DB. Extract links the graph. Embed refreshes vectors. Orphan sweep reports the gaps. If your autopilot daemon was doing sync-before-lint (which PR #309's original dream.ts also got wrong), your fixes landed the next cycle instead of the current one. Fixed.
+
+Autopilot users upgrading get lint + orphan sweep for free. No config change. `gbrain jobs list` shows the full 6-phase report now. If you don't want the daemon modifying files, `gbrain dream --phase orphans` in cron keeps autopilot for embed+sync and gives you manual control over the writes.
+
+### The numbers that matter
+
+Measured against a v0.16 baseline. Lines-of-code delta is net-small: runCycle adds ~500 lines, but the new dream.ts is 80 lines (vs the 446-line original in PR #309), and autopilot's two-path branching collapses to one delegated call.
+
+| Metric | BEFORE v0.17 | AFTER v0.17 | Δ |
+|--------|--------------|-------------|---|
+| `gbrain dream --dry-run` mutates DB | Yes (full-sync + embed silently wrote) | No (every phase honors dry-run) | correctness |
+| Sources of truth for "the cycle" | 3-4 (dream inline, dream shell-outs, autopilot inline, Minions handler) | 1 (`runCycle`) | DRY win |
+| Phase order: fix-then-index | No (sync before lint) | Yes (lint → backlinks → sync → extract → embed → orphans) | semantics |
+| Coordination across daemon + cron + Minions worker | Lockfile heuristic with 6 known holes | DB lock table + PID-liveness file lock | primitive upgrade |
+| Works under PgBouncer transaction pooling | No (session-scoped `pg_try_advisory_lock`) | Yes (TTL row, refreshed between phases) | Supabase-safe |
+| `findRepoRoot` walks into wrong git repo | Yes (10 levels of cwd) | No (explicit --dir OR configured sync.repo_path) | footgun fixed |
+| Autopilot daemon phase count | 4 (sync+extract+embed+backlinks in Minions mode; no backlinks inline) | 6 (+lint +orphans) | feature parity |
+| CycleReport shape stability for agents | N/A | `schema_version: "1"` (stable, additive only) | API contract |
+
+### What this means for your workflow
+
+Cron users: one line. `0 2 * * * gbrain dream --json >> /var/log/gbrain-dream.log`. You get a structured `CycleReport` every morning with per-phase timing, counts, and any errors tagged with `{class, code, message, hint, docs_url}`.
+
+Autopilot users: nothing to do. Your daemon picks up the new phases on next cycle. If you want to see them: `gbrain jobs get <autopilot-cycle-id>` shows the full report.
+
+Reviewers/codex caught three plan-breakers during multi-round review that would have shipped silent DB writes on dry-run: (1) `performSync`'s full-sync path was ignoring `opts.dryRun`, (2) `runEmbedCore` had no dry-run mode and returned void, (3) `findOrphans` used `db.getConnection()` global and didn't compose with a passed engine. All three are fixed as preconditions (commits 1-3 of the 6-commit bisectable series).
+
+Credit: @knee5 for the original `gbrain dream` thesis (PR #309). The brand-promise framing survived; the implementation got redesigned from scratch around the runCycle primitive after CEO + Eng + Codex + DX review found structural issues.
+
+## To take advantage of v0.17.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the migration orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Your agent reads `skills/migrations/v0.17.0.md` the next time you interact with it.** No mechanical host-repo action required; the schema migration (v16 cycle-lock table) and the behavior shift in autopilot's inline path both apply automatically.
+3. **Verify the outcome:**
+   ```bash
+   gbrain dream --help                              # new command exists
+   gbrain dream --dry-run --json                    # safe preview
+   gbrain doctor                                    # should show no pending migrations
+   ```
+   Autopilot users: `gbrain jobs list --status complete | head -5` and inspect an `autopilot-cycle` job with `gbrain jobs get <id>` — the report now includes 6 phases.
+4. **If any step fails or the numbers look wrong,** please file an issue: https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
+### Itemized changes
+
+**New CLI command: `gbrain dream`**
+- One-shot maintenance cycle for cron. Exits when done. Flags: `--dry-run`, `--json`, `--phase <name>`, `--pull`, `--dir <path>`, `--help`.
+- `--help` shows cron example + cross-reference to `autopilot --install` for continuous daemon.
+- Empty-state output is intentionally satisfying: `Brain is healthy. 6 phase(s) checked in 2.3s.` Agents detect it via `status: "clean"`.
+- Exit code 1 on `status: "failed"`. Warnings (`status: "partial"`) are not failures — don't page someone.
+- `--dir` OR `sync.repo_path` config required. No more walk-up-cwd-for-.git footgun.
+
+**New primitive: `src/core/cycle.ts`**
+- `runCycle(engine: BrainEngine | null, opts: CycleOpts): Promise<CycleReport>`.
+- Six phases in order: lint → backlinks → sync → extract → embed → orphans.
+- `CycleReport` has `schema_version: "1"` (stable, additive). `status: 'ok' | 'clean' | 'partial' | 'skipped' | 'failed'` with `reason` field on skipped.
+- `PhaseResult.error: { class, code, message, hint?, docs_url? }` on fail. Stripe-API-tier structured errors.
+- `yieldBetweenPhases` hook awaited between every phase + before return. Required for Minions worker lock renewal. Exceptions non-fatal.
+- Engine nullable — filesystem phases run without DB; DB phases skip with `reason: "no_database"`.
+- Lock-skip: read-only phase selections (`--phase orphans`) skip lock acquisition.
+
+**New schema: `gbrain_cycle_locks` (migration v16)**
+- DB lock table with TTL (30 min), replaces session-scoped `pg_try_advisory_lock` which the v0.15.4 PgBouncer-transaction-pooler fix silently broke.
+- Refreshed between phases via the yield hook. Crashed holders auto-release on TTL expiry.
+- PGLite + engine=null use a file-based fallback at `~/.gbrain/cycle.lock` with PID-liveness check (EPERM treated as alive so PID 1 holders aren't mis-classified).
+
+**Autopilot + Minions integration**
+- Autopilot's inline fallback path (`--inline` flag + PGLite mode) now delegates to `runCycle`. Gains lint + orphan phases it didn't run before. Uses `pull: true` by default (preserves pre-v0.17 pull semantics).
+- Minions `autopilot-cycle` handler (in `src/commands/jobs.ts`) also delegates to `runCycle`. Returns `{ partial, status, report }` so `gbrain jobs get <id>` surfaces the full structured report.
+- `gbrain autopilot --install` install/uninstall/launchd/systemd/crontab machinery untouched.
+- `gbrain autopilot --help` now cross-references `gbrain dream`.
+
+**Precondition fixes (required for the runCycle primitive to compose cleanly)**
+- `src/commands/sync.ts`: `performFullSync` honors `opts.dryRun` in first-sync + `--full` paths. Was silently calling `runImport` regardless. `SyncResult.embedded: number` field added; `first_sync` path now returns real counts from `runImport` (was hardcoded to 0).
+- `src/commands/embed.ts`: `runEmbedCore` adds `dryRun?: boolean` opt and returns `EmbedResult { embedded, skipped, would_embed, total_chunks, pages_processed, dryRun }` instead of `void`. `gbrain embed --stale --dry-run` is now a safe preview.
+- `src/commands/orphans.ts`: `findOrphans(engine, opts)` takes a `BrainEngine` parameter. Added `findOrphanPages()` method to `BrainEngine` interface + implementations on both `postgres-engine` and `pglite-engine`. Drops `db.getConnection()` global — findOrphans now composes with test-injected engines and works on PGLite.
+
+**Tests (all run in CI, no DATABASE_URL or API keys required)**
+- `test/sync.test.ts`: 4 new cases. First-sync dry-run, incremental dry-run, `--full` dry-run, SyncResult.embedded shape. PGLite + temp git repo.
+- `test/embed.test.ts`: 4 new cases. Dry-run with stale chunks, dry-run stale-vs-fresh split, dry-run --slugs, non-dry-run regression guard. Mocked `embedBatch`.
+- `test/orphans.test.ts`: 4 new cases. Engine-injected findOrphans, includePseudo flag, queryOrphanPages delegation, empty-brain edge. PGLite.
+- `test/core/cycle.test.ts` (new): 18 cases covering dryRun × phases × lock_held × engine-null. Shared PGLite engine per describe via beforeAll + truncateCycleLocks (cuts test time ~3x vs per-test init).
+- `test/dream.test.ts` (rewritten, 11 cases): brainDir resolution, phase selection, phase validation, JSON output shape, dry-run propagation, exit-code semantics. Real PGLite + real library calls (no `mock.module` to avoid leakage).
+
+**Docs**
+- `skills/migrations/v0.17.0.md`: new. Informational, no mechanical action required.
+- `CHANGELOG.md` + `CLAUDE.md`: updated.
+
+**PR #309 disposition**
+- Closed with credit to @knee5. Their thesis ("`gbrain dream` as first-class CLI verb") was right; the implementation got redesigned around the runCycle primitive after deep review surfaced structural issues in the fold approach.
+- `Co-Authored-By` preserved on commit 5 (the dream.ts rewrite).
+
+---
 
 ## [0.16.4] - 2026-04-22
 
@@ -156,6 +374,8 @@ gbrain check-resolvable || exit 1        # fails the build on any warning/error
 
 **Contract note for CI users**
 - `gbrain check-resolvable` exits 1 on warnings AND errors. `gbrain doctor`'s resolver_health block still exits 0 on warnings-only. If you scripted against doctor's looser gate, `check-resolvable` will bite harder ... on purpose. This honors the README:259 contract: "Exits non-zero if anything is off."
+
+---
 
 ## [0.16.3] - 2026-04-22
 
@@ -237,6 +457,8 @@ So `tsc --noEmit` actually stays green. All mechanical, zero behavior change. Gr
    - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
 
 ### Itemized changes
+
+---
 
 ## [0.16.2] - 2026-04-22
 
@@ -331,7 +553,6 @@ Docs-only release. No code changed. Zero migration required.
 
 **Added**
 - **Minions worker deployment guide** — new `docs/guides/minions-deployment.md` covering watchdog cron patterns, inline `--follow` for cron-only workloads, and the sharp edges of running `gbrain jobs work` against Supabase in production. Addresses a real gap: existing Minions docs (`minions-fix.md`, `minions-shell-jobs.md`) cover schema repair and shell-job security, not deploy patterns. Contributed by your OpenClaw via #287. Pre-landing accuracy pass corrected five factual bugs against current source: the `max_stalled` column default (5, not 1 or 3), the stalled-jobs smoke-test query (`active`, not `waiting`), the SIGTERM-to-SIGKILL grace window (10s minimum, not 2s), the cron env pattern (crontab env lines, not `source ~/.bashrc`), and the `--follow` exit semantics (blocks until submitted job is terminal, not until queue is empty).
-
 ## [0.16.0] - 2026-04-20
 
 ## **Durable agents land. Your LLM loops survive crashes, timeouts, and worker restarts now.**
