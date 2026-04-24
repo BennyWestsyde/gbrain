@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { buildError, errorFor, serializeError, GBrainError } from '../src/core/errors.ts';
+import { buildError, errorFor, serializeError, StructuredAgentError } from '../src/core/errors.ts';
 
 describe('buildError', () => {
   test('returns envelope with required fields only', () => {
@@ -24,13 +24,13 @@ describe('buildError', () => {
   });
 });
 
-describe('GBrainError', () => {
+describe('StructuredAgentError', () => {
   test('is throwable and catchable as Error', () => {
     try {
       throw errorFor({ class: 'FileTooLarge', code: 'too_big', message: 'file exceeds 10MB' });
     } catch (e) {
       expect(e).toBeInstanceOf(Error);
-      expect(e).toBeInstanceOf(GBrainError);
+      expect(e).toBeInstanceOf(StructuredAgentError);
     }
   });
 
@@ -58,7 +58,7 @@ describe('GBrainError', () => {
 });
 
 describe('serializeError', () => {
-  test('unwraps GBrainError envelope', () => {
+  test('unwraps StructuredAgentError envelope', () => {
     const err = errorFor({ class: 'A', code: 'b', message: 'c', hint: 'd' });
     expect(serializeError(err)).toEqual({ class: 'A', code: 'b', message: 'c', hint: 'd' });
   });

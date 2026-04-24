@@ -14,6 +14,8 @@ export interface Page {
   updated_at: Date;
 }
 
+export type PageKind = 'markdown' | 'code';
+
 export interface PageInput {
   type: PageType;
   title: string;
@@ -21,6 +23,13 @@ export interface PageInput {
   timeline?: string;
   frontmatter?: Record<string, unknown>;
   content_hash?: string;
+  /**
+   * v0.19.0: distinguishes markdown vs code pages at the DB level. Defaults
+   * to 'markdown' when omitted so existing callers work unchanged. Set to
+   * 'code' by importCodeFile; drives orphans filter, auto-link bypass, and
+   * `query --lang` filtering.
+   */
+  page_kind?: PageKind;
 }
 
 export interface PageFilters {
@@ -52,6 +61,16 @@ export interface ChunkInput {
   embedding?: Float32Array;
   model?: string;
   token_count?: number;
+  /**
+   * v0.19.0: optional code-chunk metadata. Populated by importCodeFile from
+   * the tree-sitter AST; NULL for markdown chunks. Drives `query --lang`,
+   * `code-def`, `code-refs`, and the new searchCodeChunks engine method.
+   */
+  language?: string;
+  symbol_name?: string;
+  symbol_type?: string;
+  start_line?: number;
+  end_line?: number;
 }
 
 // Search

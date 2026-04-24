@@ -138,11 +138,13 @@ export class PostgresEngine implements BrainEngine {
     // CONFLICT target becomes (source_id, slug) since global UNIQUE(slug)
     // was dropped in migration v17. See pglite-engine.ts for matching
     // notes; multi-source sync (Step 5) will surface an explicit sourceId.
+    const pageKind = page.page_kind || 'markdown';
     const rows = await sql`
-      INSERT INTO pages (slug, type, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-      VALUES (${slug}, ${page.type}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now())
+      INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
+      VALUES (${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now())
       ON CONFLICT (source_id, slug) DO UPDATE SET
         type = EXCLUDED.type,
+        page_kind = EXCLUDED.page_kind,
         title = EXCLUDED.title,
         compiled_truth = EXCLUDED.compiled_truth,
         timeline = EXCLUDED.timeline,
@@ -336,9 +338,11 @@ export class PostgresEngine implements BrainEngine {
       return;
     }
 
-    // Batch upsert: build a single multi-row INSERT ON CONFLICT statement
-    // This avoids per-row round-trips and reduces lock contention under parallel workers
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)';
+    // Batch upsert: build a single multi-row INSERT ON CONFLICT statement.
+    // v0.19.0: includes language/symbol_name/symbol_type/start_line/end_line
+    // so code chunks carry tree-sitter metadata into the DB. Markdown chunks
+    // pass NULL for all five.
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line)';
     const rows: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -349,11 +353,21 @@ export class PostgresEngine implements BrainEngine {
         : null;
 
       if (embeddingStr) {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now())`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(
+          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+          embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+          chunk.start_line ?? null, chunk.end_line ?? null,
+        );
       } else {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL)`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(
+          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+          chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+          chunk.start_line ?? null, chunk.end_line ?? null,
+        );
       }
     }
 
@@ -366,7 +380,12 @@ export class PostgresEngine implements BrainEngine {
          embedding = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding ELSE COALESCE(EXCLUDED.embedding, content_chunks.embedding) END,
          model = COALESCE(EXCLUDED.model, content_chunks.model),
          token_count = EXCLUDED.token_count,
-         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at)`,
+         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at),
+         language = EXCLUDED.language,
+         symbol_name = EXCLUDED.symbol_name,
+         symbol_type = EXCLUDED.symbol_type,
+         start_line = EXCLUDED.start_line,
+         end_line = EXCLUDED.end_line`,
       params as Parameters<typeof sql.unsafe>[1],
     );
   }

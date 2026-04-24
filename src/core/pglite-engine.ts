@@ -134,11 +134,13 @@ export class PGLiteEngine implements BrainEngine {
     // a parameter. ON CONFLICT target becomes (source_id, slug) since the
     // global UNIQUE(slug) was dropped in migration v17. Step 5+ will
     // surface an explicit sourceId param on putPage for multi-source sync.
+    const pageKind = page.page_kind || 'markdown';
     const { rows } = await this.db.query(
-      `INSERT INTO pages (slug, type, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
+      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
        ON CONFLICT (source_id, slug) DO UPDATE SET
          type = EXCLUDED.type,
+         page_kind = EXCLUDED.page_kind,
          title = EXCLUDED.title,
          compiled_truth = EXCLUDED.compiled_truth,
          timeline = EXCLUDED.timeline,
@@ -146,7 +148,7 @@ export class PGLiteEngine implements BrainEngine {
          content_hash = EXCLUDED.content_hash,
          updated_at = now()
        RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
-      [slug, page.type, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
+      [slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
   }
@@ -309,8 +311,11 @@ export class PGLiteEngine implements BrainEngine {
       return;
     }
 
-    // Batch upsert: build dynamic multi-row INSERT
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)';
+    // Batch upsert: build dynamic multi-row INSERT.
+    // v0.19.0: includes language/symbol_name/symbol_type/start_line/end_line
+    // so code chunks carry their tree-sitter metadata into the DB. Markdown
+    // chunks pass NULL for all five. Order must match the column list.
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line)';
     const rowParts: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -321,11 +326,21 @@ export class PGLiteEngine implements BrainEngine {
         : null;
 
       if (embeddingStr) {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now())`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(
+          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+          embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+          chunk.start_line ?? null, chunk.end_line ?? null,
+        );
       } else {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL)`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(
+          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+          chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+          chunk.start_line ?? null, chunk.end_line ?? null,
+        );
       }
     }
 
@@ -337,7 +352,12 @@ export class PGLiteEngine implements BrainEngine {
          embedding = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding ELSE COALESCE(EXCLUDED.embedding, content_chunks.embedding) END,
          model = COALESCE(EXCLUDED.model, content_chunks.model),
          token_count = EXCLUDED.token_count,
-         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at)`,
+         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at),
+         language = EXCLUDED.language,
+         symbol_name = EXCLUDED.symbol_name,
+         symbol_type = EXCLUDED.symbol_type,
+         start_line = EXCLUDED.start_line,
+         end_line = EXCLUDED.end_line`,
       params
     );
   }

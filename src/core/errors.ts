@@ -52,7 +52,7 @@ export function buildError(input: BuildErrorInput): StructuredError {
  * Agents catch this, extract `.envelope`, and print `{error: envelope}` as JSON.
  * Humans see the plain message via Error.message.
  */
-export class GBrainError extends Error {
+export class StructuredAgentError extends Error {
   readonly envelope: StructuredError;
 
   constructor(envelope: StructuredError) {
@@ -67,17 +67,17 @@ export class GBrainError extends Error {
  * Helper to construct-and-throw in one call.
  * Usage: throw errorFor({ class: 'FileTooLarge', code: 'file_too_large', message: '...' });
  */
-export function errorFor(input: BuildErrorInput): GBrainError {
-  return new GBrainError(buildError(input));
+export function errorFor(input: BuildErrorInput): StructuredAgentError {
+  return new StructuredAgentError(buildError(input));
 }
 
 /**
  * Serialize an error envelope or unknown throwable for JSON output.
- * If the value is a GBrainError, uses its structured envelope.
+ * If the value is a StructuredAgentError, uses its structured envelope.
  * Otherwise falls back to a generic {class: 'Error', code: 'unknown', message}.
  */
 export function serializeError(value: unknown): StructuredError {
-  if (value instanceof GBrainError) return value.envelope;
+  if (value instanceof StructuredAgentError) return value.envelope;
   if (value instanceof Error) {
     return buildError({
       class: value.name || 'Error',

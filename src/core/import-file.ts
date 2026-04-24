@@ -4,7 +4,7 @@ import { createHash } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
-import { chunkCodeText, detectCodeLanguage } from './chunkers/code.ts';
+import { chunkCodeText, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
 import { embedBatch } from './embedding.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath } from './sync.ts';
 import type { ChunkInput, PageType } from './types.ts';
@@ -234,9 +234,10 @@ export async function importCodeFile(
     return { slug, status: 'skipped', chunks: 0, error: `Code file too large (${byteLength} bytes)` };
   }
 
-  // Hash for idempotency
+  // Hash for idempotency. CHUNKER_VERSION is folded in so chunker shape
+  // changes across releases force clean re-chunks without sync --force.
   const hash = createHash('sha256')
-    .update(JSON.stringify({ title, type: 'code', content, lang }))
+    .update(JSON.stringify({ title, type: 'code', content, lang, chunker_version: CHUNKER_VERSION }))
     .digest('hex');
 
   const existing = await engine.getPage(slug);
@@ -244,12 +245,20 @@ export async function importCodeFile(
     return { slug, status: 'skipped', chunks: 0 };
   }
 
-  // Chunk via tree-sitter code chunker
+  // Chunk via tree-sitter code chunker. The chunker returns per-chunk
+  // metadata (symbol_name, symbol_type, language, start_line, end_line)
+  // which we persist as columns so the v0.19.0 query --lang + code-def +
+  // code-refs surfaces can filter without parsing chunk_text.
   const codeChunks = await chunkCodeText(content, relativePath);
   const chunks: ChunkInput[] = codeChunks.map((c, i) => ({
     chunk_index: i,
     chunk_text: c.text,
     chunk_source: 'compiled_truth' as const,
+    language: c.metadata.language,
+    symbol_name: c.metadata.symbolName || undefined,
+    symbol_type: c.metadata.symbolType,
+    start_line: c.metadata.startLine,
+    end_line: c.metadata.endLine,
   }));
 
   // Embed
@@ -271,6 +280,7 @@ export async function importCodeFile(
 
     await tx.putPage(slug, {
       type: 'code' as PageType,
+      page_kind: 'code',
       title,
       compiled_truth: content,
       timeline: '',

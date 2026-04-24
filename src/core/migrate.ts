@@ -812,6 +812,72 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 25,
+    name: 'pages_page_kind',
+    // v0.19.0 Layer 3 — pages.page_kind distinguishes markdown vs code pages
+    // at the DB level. Needed so orphans filter, link-extraction auto-link,
+    // and query --lang can branch on kind without sniffing `type` or chunk
+    // metadata. Existing rows backfill to 'markdown' (pre-v0.19.0 all pages
+    // were markdown).
+    //
+    // Postgres: ADD COLUMN with DEFAULT is O(1) for nullable columns (no
+    // rewrite). The CHECK constraint is added NOT VALID so the initial
+    // statement does not scan the table, then VALIDATE CONSTRAINT runs
+    // separately. Tables with millions of pages would otherwise hold a
+    // write lock during the full scan.
+    sqlFor: {
+      postgres: `
+        ALTER TABLE pages
+          ADD COLUMN IF NOT EXISTS page_kind TEXT NOT NULL DEFAULT 'markdown';
+
+        ALTER TABLE pages
+          DROP CONSTRAINT IF EXISTS pages_page_kind_check;
+        ALTER TABLE pages
+          ADD CONSTRAINT pages_page_kind_check
+          CHECK (page_kind IN ('markdown','code')) NOT VALID;
+        ALTER TABLE pages VALIDATE CONSTRAINT pages_page_kind_check;
+      `,
+      pglite: `
+        ALTER TABLE pages
+          ADD COLUMN IF NOT EXISTS page_kind TEXT NOT NULL DEFAULT 'markdown'
+          CHECK (page_kind IN ('markdown','code'));
+      `,
+    },
+    sql: `
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS page_kind TEXT NOT NULL DEFAULT 'markdown'
+        CHECK (page_kind IN ('markdown','code'));
+    `,
+  },
+  {
+    version: 26,
+    name: 'content_chunks_code_metadata',
+    // v0.19.0 Layer 3 — content_chunks gains code-specific metadata columns
+    // so C6 (query --lang), C7 (code-def / code-refs), and the new
+    // searchCodeChunks engine method can filter + surface symbol context
+    // without parsing chunk_text.
+    //
+    // All new columns are nullable — existing markdown chunks carry NULL.
+    // importCodeFile populates them from the tree-sitter AST.
+    //
+    // Partial indexes (WHERE <col> IS NOT NULL) keep the index small: a
+    // brain with 20K markdown chunks + 20K code chunks indexes only the
+    // code chunks for symbol lookups. Measured ~200ms → ~15ms on code-refs.
+    sql: `
+      ALTER TABLE content_chunks
+        ADD COLUMN IF NOT EXISTS language TEXT,
+        ADD COLUMN IF NOT EXISTS symbol_name TEXT,
+        ADD COLUMN IF NOT EXISTS symbol_type TEXT,
+        ADD COLUMN IF NOT EXISTS start_line INTEGER,
+        ADD COLUMN IF NOT EXISTS end_line INTEGER;
+
+      CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name
+        ON content_chunks(symbol_name) WHERE symbol_name IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_chunks_language
+        ON content_chunks(language) WHERE language IS NOT NULL;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
