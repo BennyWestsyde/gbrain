@@ -1,90 +1,69 @@
 # TODOS
 
-## code-indexing (v0.19.0 follow-ups)
+## code-indexing (v0.20.0 Cathedral II follow-ups)
 
-### sync --all cost preview with TTY detection + tokenizer-based estimate
-**Priority:** P1
-
-**What:** Before `gbrain sync --all` writes any chunks, compute a token estimate for every file that would be embedded, multiply by `text-embedding-3-large` rate ($0.00013/1K), and print a preview. On TTY with no `--json`: interactive `[y/N]` prompt. On non-TTY or with `--json`: emit a `ConfirmationRequired` structured error (class + code + hint) and exit non-zero — the agent parses the envelope and decides. `--yes` bypasses the prompt for automation. `--dry-run` prints the preview and exits 0.
-
-**Why:** v0.19.0 ships code indexing that can cost real money on first sync of a large repo. A 5K-file TS repo at cl100k_base densities is ~400K tokens, ~$5 one-time. Without a preview, users hit the bill by surprise. With a prompt, they see the cost before it lands. The DX review (`/plan-devex-review`) identified this as DX fix #1 for the agent persona — an interactive `[y/N]` silently breaks OpenClaw sessions that can't respond to stdin, so the non-TTY path must emit a parseable error instead.
-
-**Pros:** Closes DX fix #1 from `/plan-devex-review`. Prevents surprise OpenAI bills on first sync. Establishes the TTY-detection pattern for future cost-gated commands (embed --all, re-embed, etc.).
-
-**Cons:** Requires folding tiktoken into the sync path (currently only in chunkers). Needs a small UX dance for multi-source syncs (sum across sources? per-source prompts? probably sum).
-
-**Context:**
-- `src/commands/sync.ts:590` is where the `--all` iteration lives. Current code enters the loop and starts syncing without counting anything.
-- `src/core/chunkers/code.ts` already has `estimateTokens` using the right tokenizer — extract + reuse.
-- `src/core/errors.ts` has `buildError` ready; this becomes `{ class: 'ConfirmationRequired', code: 'cost_preview_requires_yes', hint: 'Pass --yes to proceed, or run with --dry-run to see the estimate.' }`.
-- DX doctrine in the v0.19.0 plan (see `/plan-devex-review` review report): non-TTY writes JSON, `--json` forces JSON on TTY, `--no-json` forces human even when piped.
-
-**Effort:** M (human: ~2 days / CC: ~45 min).
-
-**Depends on / blocked by:** Nothing — purely additive on v0.19.0.
-
-### query --lang filter wired through src/core/search/*.ts
+### B2 — Magika auto-detect for extension-less files (Layer 9 deferred)
 **Priority:** P2
 
-**What:** Add a `--lang <language>` flag to `gbrain query` that filters hybrid-search results to chunks with `content_chunks.language = <lang>`. Plumbs through `searchKeyword` and `searchVector` on both engines plus the RRF merge.
+**What:** Embed Google's Magika ML classifier (~1MB ONNX) as a bundled asset. Wire into `detectCodeLanguage` as the fallback for files with no recognized extension (Dockerfile, Makefile, `.envrc`, shell scripts with shebangs but no `.sh`). The chunker already has `setLanguageFallback(fn)` as a module-level hook.
 
-**Why:** v0.19.0 persists `language` on every code chunk (migration v26). Without the filter, asking "show me how we handle errors in TypeScript" returns mixed-language results — a Python match can rank above the actual TS answer. The column is already there; the query path just needs to respect it.
+**Why:** v0.20.0 widens the file classifier from 9 to 35 extensions (Layer 2), covering most real-world cases. Extension-less files still slip through to recursive chunks. Magika would close the last common case.
 
-**Pros:** Closes C6 from the v0.19.0 plan. Lets agents scope code search to a single language when the language is known (which is often).
+**Pros:** Completes the file-classification story. Unblocks chunker on real-world configs + build scripts.
 
-**Cons:** Touches the hot search path. Needs new index on `content_chunks(language)` (actually already exists as a partial index from v26). Small ranking regression risk — must run BrainBench after.
+**Cons:** ~1MB asset bundled with `bun --compile`. Integration risk: Magika's ONNX runtime needs WASM compat with bun. The plan explicitly allowed deferring B2 because bundling surprises late in implementation are costly.
 
 **Context:**
-- `src/core/search/` has `intent.ts`, `eval.ts`, `dedup.ts`. The filter lands in the hybrid-search orchestrator plus the pglite/postgres `searchKeyword` + `searchVector` methods.
-- `src/core/pglite-engine.ts:227` (and sibling postgres-engine) is where the WHERE clause gets added.
-- `test/e2e/code-indexing.test.ts` already has a language-filter pattern via `code-def` / `code-refs` — mirror that shape.
-- See also: `findCodeDef` and `findCodeRefs` already accept `opts.language` — `query` should feel the same.
+- `src/core/chunkers/code.ts` exports `setLanguageFallback(fn: LanguageFallback | null)` — call at process start with a Magika-powered classifier.
+- `detectCodeLanguage(filePath, content?)` already accepts optional content for fallback paths.
+- The NPM `magika` package is the first thing to try; needs bun-compile compatibility verification.
 
-**Effort:** M (human: ~2 days / CC: ~30 min).
+**Effort:** M (human: ~2-3 days / CC: ~2 hours for the integration + CI guard).
 
-**Depends on / blocked by:** Nothing. v0.19.0 persists the column and ships the partial index.
+**Depends on / blocked by:** Nothing. Hook is in place as of v0.20.0.
 
-### E3 — markdown code-fence extraction
+### A4 — full doc_comment extraction at chunk time
 **Priority:** P2
 
-**What:** When `importFromContent` imports a markdown page, walk the AST (use the existing `marked` lexer) to find fenced code blocks. For each fence with a recognized language tag, chunk the content through the code chunker and persist as extra chunks on the parent markdown page with `chunk_source='fenced_code'`. Search returns fence chunks alongside prose chunks with their language in the structured header.
+**What:** When the chunker emits a method/class/function, look at the comment node(s) immediately preceding the declaration and persist them as `content_chunks.doc_comment`. The FTS trigger from Layer 1b already weights `doc_comment` 'A' above `chunk_text` 'B' — the ranking is ready, the column is populated NULL today.
 
-**Why:** ~40% of gbrain's brain is guides, design docs, and architecture notes with substantial inline code. Today those fences are chunked as prose — `gbrain query "import from engine"` ranks paragraphs ABOUT the import above the actual import example. With E3, a `\`\`\`ts import { Engine } from './engine'\`\`\`` block lands in search as a first-class TS chunk. Cheap quality win.
+**Why:** "how does X handle N+1" should rank the docstring that explains N+1 above the function body or any prose paragraph. Layer 1b paved the ranking half; extraction is the remaining half.
 
-**Pros:** Materially improves retrieval quality on docs-heavy brains. Marginal cost — uses existing chunker + marked lexer. No new schema.
+**Pros:** Material MRR lift on natural-language queries. Zero schema work (column + trigger already in place).
 
-**Cons:** One more code path in `importFromContent`. Fence detection is already solved by the marked lexer, so mostly mechanical.
-
-**Context:**
-- `src/core/import-file.ts:54` is `importFromContent`. After `parseMarkdown` returns, iterate the lexer tokens to find `{ type: 'code', lang, text }` entries.
-- `chunk_source` is already nullable-ish — add `'fenced_code'` as a new discriminator value.
-- `detectCodeLanguage` in `src/core/chunkers/code.ts` takes a filename — for fences we have a language tag (`ts`, `python`, etc.). Map the tag to the enum (new small helper).
-- Test plan already in place: the coverage diagram in `/plan-eng-review` had `test/markdown-fence-extraction.test.ts` as a deferred test file.
-
-**Effort:** S (human: ~1 day / CC: ~20 min).
-
-**Depends on / blocked by:** Nothing.
-
-### A3 — reverse-scan backfill for doc↔impl
-**Priority:** P2
-
-**What:** When `importCodeFile` writes a new code page, scan existing markdown pages for references to the new code path and create the `documents` / `documented_by` edges retroactively. Mirrors the v0.12.0 auto-link backfill pattern.
-
-**Why:** v0.19.0 Layer 6 wires E1 (doc↔impl linking) in `importFromContent` — markdown imports get edges. But if a markdown guide is imported BEFORE the code file it cites (very common order — docs land first, code sync runs second), the edge extraction succeeds but `addLink`'s inner JOIN drops the edge because the code page doesn't exist yet. A3 fixes that by having `importCodeFile` run the reverse scan on every code import.
-
-**Pros:** Eliminates order-dependency in the doc↔impl graph. Users don't need to care whether markdown or code syncs first.
-
-**Cons:** Runs an extra query per code file imported. On a 5K-file first sync, that's 5K `SELECT from pages WHERE page_kind='markdown' AND compiled_truth ILIKE '%<path>%'` queries. Needs a better shape — probably a `pg_trgm` index on `pages.compiled_truth` (already exists as `idx_pages_trgm` on `title`; add a broader one?) or defer to a batch "reconcile" step.
+**Cons:** Per-language convention detection — JSDoc blocks, Python docstrings (first string expression in a function body), C-style doc comments, etc. Not hard but each language has edge cases.
 
 **Context:**
-- `src/core/import-file.ts:222` is `importCodeFile`. The reverse scan would be a tail step after `putPage` + `upsertChunks` succeed.
-- Pattern: `SELECT p.slug FROM pages p WHERE p.page_kind = 'markdown' AND (p.compiled_truth || ' ' || coalesce(p.timeline, '')) ILIKE '%' || $1 || '%'` where `$1` is the code file's relative path.
-- For each matching markdown slug, call `addLink(md_slug, code_slug, ..., 'documents', ...)` and the reverse.
-- Alternative: add a `gbrain reconcile-links` batch command that runs the full scan once per source. Cheaper per-file but user-triggered.
+- `src/core/chunkers/code.ts` emits chunks in `chunkCodeTextFull`. Walk each declaration's preceding sibling(s) for comment nodes.
+- ChunkInput already has `doc_comment?: string`. Populate at chunk time and it flows through `upsertChunks` (Layer 6 wired those columns).
+- Per-language config: leading-comment type names per language (`comment`, `line_comment`, `block_comment`, `documentation_comment`).
+- Test hook: `test/cathedral-ii-brainbench.test.ts` has a `doc_comment_matching` placeholder — flesh it out end-to-end.
 
-**Effort:** M (human: ~1-2 days / CC: ~30 min for the per-file version, ~15 min for the batch command).
+**Effort:** M (human: ~2 days / CC: ~90 min for the 8 Layer-5 langs).
 
-**Depends on / blocked by:** E1 shipped in v0.19.0 Layer 6. This is the companion piece that makes E1 order-independent.
+**Depends on / blocked by:** Nothing. Layer 1b + Layer 6 both in place.
+
+### C6 — gbrain code-signature "(A, B) => C"
+**Priority:** P3 (stretch)
+
+**What:** Type-signature retrieval via tree-sitter type captures per language. "Find every function whose signature returns a Promise<User>" or "(string, number) => boolean".
+
+**Why:** Each language's type system is its own mini-cathedral. Ship per-language rather than as one item.
+
+**Effort:** L per language (typescript-first).
+
+**Depends on / blocked by:** Nothing — additive on the Layer 5 edge schema.
+
+### Cross-file edge resolution (Layer 5 precision upgrade)
+**Priority:** P3
+
+**What:** Today every call edge lands unresolved in `code_edges_symbol` with to_symbol_qualified = bare callee name. Second-pass resolution: after all code files import, walk every `code_edges_symbol` row and try to resolve `to_symbol_qualified` via `symbol_name_qualified` join; if found within the same source, write a resolved row to `code_edges_chunk`.
+
+**Why:** `getCallersOf("searchKeyword")` currently returns the Layer 6 ambiguity — every `searchKeyword` call site in any class. Receiver-type analysis lifts this.
+
+**Effort:** L. Needs receiver-type inference; can ship per-language.
+
+**Depends on / blocked by:** Nothing — UNION-on-read path keeps unresolved edges surfaced even without this.
 
 ## check-resolvable
 
