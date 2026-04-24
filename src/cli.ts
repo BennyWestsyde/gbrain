@@ -19,7 +19,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'repos', 'code-def', 'code-refs', 'reindex-code']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'repos', 'code-def', 'code-refs', 'reindex-code', 'code-callers', 'code-callees']);
 
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
@@ -504,6 +504,18 @@ async function handleCliOnly(command: string, args: string[]) {
         await runReindexCodeCli(engine, args);
         break;
       }
+      case 'code-callers': {
+        // v0.20.0 Cathedral II Layer 10 (C4): "who calls <symbol>?"
+        const { runCodeCallers } = await import('./commands/code-callers.ts');
+        await runCodeCallers(engine, args);
+        break;
+      }
+      case 'code-callees': {
+        // v0.20.0 Cathedral II Layer 10 (C5): "what does <symbol> call?"
+        const { runCodeCallees } = await import('./commands/code-callees.ts');
+        await runCodeCallees(engine, args);
+        break;
+      }
       case 'repos': {
         // v0.19.0: `gbrain repos ...` is an alias into the v0.18.0 sources
         // subsystem. The repos abstraction (Wintermute's baseline) was
@@ -641,6 +653,8 @@ SOURCES (multi-repo / multi-brain)
 CODE INDEXING (v0.19.0 / v0.20.0 Cathedral II)
   code-def <symbol> [--lang l]       Find the definition of a symbol across code pages
   code-refs <symbol> [--lang l]      Find all references to a symbol (JSON-first)
+  code-callers <symbol>              Who calls this symbol? (v0.20.0 A1)
+  code-callees <symbol>              What does this symbol call? (v0.20.0 A1)
   query <q> --lang <l>               Filter hybrid search to one language (v0.20.0)
   query <q> --symbol-kind <k>        Filter to symbol type (function|class|method|...) (v0.20.0)
   reconcile-links [--dry-run]        Batch-recompute doc↔impl edges (v0.20.0)
