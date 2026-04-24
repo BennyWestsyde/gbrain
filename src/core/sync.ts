@@ -107,14 +107,22 @@ function globToRegex(pattern: string): RegExp {
     if (ch === '*') {
       const next = pattern[i + 1];
       if (next === '*') {
-        regex += '.*';
-        i++;
+        // `**/` matches zero or more path segments (including zero, so `src/**/*.ts`
+        // matches `src/foo.ts` as well as `src/a/b/foo.ts`). Collapse `**/` →
+        // `(?:.*/)?`. A bare `**` not followed by `/` matches any chars.
+        if (pattern[i + 2] === '/') {
+          regex += '(?:.*/)?';
+          i += 2;
+        } else {
+          regex += '.*';
+          i++;
+        }
       } else {
         regex += '[^/]*';
       }
       continue;
     }
-    if (ch === '?') { regex += '.'; continue; }
+    if (ch === '?') { regex += '[^/]'; continue; }
     if ('\\.[]{}()+-^$|'.includes(ch)) { regex += `\\${ch}`; continue; }
     regex += ch;
   }
