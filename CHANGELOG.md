@@ -7,11 +7,11 @@ All notable changes to GBrain will be documented in this file.
 ## **BrainBench moves out. gbrain gets its install surface back.**
 ## **The eval harness + 5MB fictional corpus now live in a sibling repo; gbrain exposes a clean public API they consume.**
 
-BrainBench is gbrain's benchmark harness — 10/12 Cats, 4-adapter scorecard, 418-item fictional corpus, 314 tests. Previously it lived inside this repo. Every `bun install` pulled down the eval tree, `docs/benchmarks/*.md` reports, `pdf-parse` devDep, and auxiliary test fixtures whether or not you ever ran a benchmark. For the 99% of gbrain users who want a knowledge-brain CLI, that's ~5MB of noise.
+BrainBench is gbrain's benchmark harness. 10/12 Cats, 4-adapter scorecard, 418-item fictional corpus, 314 tests. Previously it lived inside this repo. Every `bun install` pulled down the eval tree, `docs/benchmarks/*.md` reports, `pdf-parse` devDep, and auxiliary test fixtures whether or not you ever ran a benchmark. For the 99% of gbrain users who want a knowledge-brain CLI, that's ~5MB of noise.
 
-v0.20 moves BrainBench to [github.com/garrytan/gbrain-evals](https://github.com/garrytan/gbrain-evals). gbrain stays the knowledge-brain CLI + library. `gbrain-evals` depends on gbrain via GitHub URL and consumes it through the public exports map. Same benchmarks, same scorecards, same Cat runners, same 418-item fictional amara-life corpus — just a separate install. Folks who don't care about evals never download them. Folks who do clone one extra repo.
+v0.20 moves BrainBench to [github.com/garrytan/gbrain-evals](https://github.com/garrytan/gbrain-evals). gbrain stays the knowledge-brain CLI + library. `gbrain-evals` depends on gbrain via GitHub URL and consumes it through the public exports map. Same benchmarks, same scorecards, same Cat runners, same 418-item fictional amara-life corpus, just a separate install. Folks who don't care about evals never download them. Folks who do clone one extra repo.
 
-The clean separation also gives gbrain a first real public API surface. `package.json` adds 11 new subpath exports — `gbrain/engine`, `gbrain/pglite-engine`, `gbrain/search/hybrid`, `gbrain/link-extraction`, `gbrain/extract`, and so on — covering every gbrain internal the eval harness reaches into. Third-party tools (not just BrainBench) now have a stable contract to consume. Removing any of these exports is a breaking change going forward.
+The clean separation also gives gbrain a first real public API surface. `package.json` adds 11 new subpath exports (`gbrain/engine`, `gbrain/pglite-engine`, `gbrain/search/hybrid`, `gbrain/link-extraction`, `gbrain/extract`, and so on) covering every gbrain internal the eval harness reaches into. Third-party tools (not just BrainBench) now have a stable contract to consume. Removing any of these exports is a breaking change going forward.
 
 ### What moved where
 
@@ -20,7 +20,7 @@ The clean separation also gives gbrain a first real public API surface. `package
 | `src/` (CLI, MCP, engines, operations, skills runtime) | `eval/` (runners, adapters, generators, schemas, gold, cli) |
 | `Page.type` enum including `email/slack/calendar-event/note/meeting` (useful for any ingested format, not just evals) | `test/eval/` (314 tests across 14 files) |
 | `inferType()` heuristics for the new directory patterns | `docs/benchmarks/*.md` (all scorecards + regression reports) |
-| Public exports map — 11 new subpaths gbrain-evals consumes | `pdf-parse` devDep (only eval/runner/loaders/pdf.ts used it) |
+| Public exports map (11 new subpaths gbrain-evals consumes) | `pdf-parse` devDep (only eval/runner/loaders/pdf.ts used it) |
 | `src/core/` test suite (1696 tests) | `eval:*` scripts (run from gbrain-evals now) |
 
 ### What this means for you
@@ -34,11 +34,11 @@ If you're a third-party library author importing gbrain internals: the new expor
 ### Itemized changes
 
 **Extracted to [gbrain-evals](https://github.com/garrytan/gbrain-evals):**
-- `eval/` — schemas, runners, adapters, generators, queries, CLI tools, docs (CONTRIBUTING, RUNBOOK, CREDITS).
-- `test/eval/` — 14 test files, 314 tests covering schemas, sealed qrels, tool-bridge, agent adapter, judge, recorder, Cat 5/6/8/9/11, amara-life skeleton, adversarial-injections, pdf loader.
-- `docs/benchmarks/` — all scorecards and regression reports (4-adapter, v0.11 vs v0.12, Minions production/lab, tweet ingestion, knowledge runtime v0.13, BrainBench v1).
-- `pdf-parse` devDep — only consumed by `eval/runner/loaders/pdf.ts`.
-- `eval:*` package.json scripts — now live in gbrain-evals's `package.json` and run from there.
+- `eval/` ... schemas, runners, adapters, generators, queries, CLI tools, docs (CONTRIBUTING, RUNBOOK, CREDITS).
+- `test/eval/` ... 14 test files, 314 tests covering schemas, sealed qrels, tool-bridge, agent adapter, judge, recorder, Cat 5/6/8/9/11, amara-life skeleton, adversarial-injections, pdf loader.
+- `docs/benchmarks/` ... all scorecards and regression reports (4-adapter, v0.11 vs v0.12, Minions production/lab, tweet ingestion, knowledge runtime v0.13, BrainBench v1).
+- `pdf-parse` devDep ... only consumed by `eval/runner/loaders/pdf.ts`.
+- `eval:*` package.json scripts ... now live in gbrain-evals's `package.json` and run from there.
 
 **Kept in gbrain (useful beyond evals):**
 - `Page.type` enum extensions in `src/core/types.ts`: `email | slack | calendar-event | note | meeting`. Any user ingesting an inbox dump, Slack export, iCal file, or meeting transcript benefits from first-class types.
@@ -46,16 +46,16 @@ If you're a third-party library author importing gbrain internals: the new expor
 - 11 new public `exports` in `package.json`: `./pglite-engine`, `./link-extraction`, `./import-file`, `./transcription`, `./embedding`, `./config`, `./markdown`, `./backoff`, `./search/hybrid`, `./search/expansion`, `./extract`. These form gbrain's public-API contract for downstream consumers.
 
 **Docs synced:**
-- `README.md` — benchmark references now point at the gbrain-evals repo.
-- `CLAUDE.md` — BrainBench section replaced with a pointer to gbrain-evals + the list of public exports that consumers depend on.
-- `src/commands/migrations/v0_12_0.ts` — migration banner text references `github.com/garrytan/gbrain-evals` instead of a local `docs/benchmarks/*.md` path that no longer resolves.
+- `README.md` ... benchmark references now point at the gbrain-evals repo.
+- `CLAUDE.md` ... BrainBench section replaced with a pointer to gbrain-evals + the list of public exports that consumers depend on.
+- `src/commands/migrations/v0_12_0.ts` ... migration banner text references `github.com/garrytan/gbrain-evals` instead of a local `docs/benchmarks/*.md` path that no longer resolves.
 
-**Tests:** 1717 gbrain tests pass, 0 failures, 174 skipped (E2E requiring `DATABASE_URL`). Full eval suite (314 tests) moves with `gbrain-evals` and runs from there.
+**Tests:** 1717 gbrain tests pass, 0 failures, 174 skipped (E2E requiring `DATABASE_URL`). The full eval suite (314 tests) moves with `gbrain-evals` and runs from there.
 
 ### To take advantage of v0.20
 
 For gbrain users:
-1. `gbrain upgrade` — no action required. The extraction is transparent.
+1. `gbrain upgrade` ... no action required. The extraction is transparent.
 2. If you previously ran `bun run eval:*` scripts from this repo: those scripts no longer exist here. `git clone https://github.com/garrytan/gbrain-evals && bun install` to get them.
 
 For gbrain-evals consumers:
