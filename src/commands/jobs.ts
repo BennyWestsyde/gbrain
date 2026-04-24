@@ -70,25 +70,42 @@ USAGE
   gbrain jobs stats
   gbrain jobs smoke
   gbrain jobs work [--queue Q] [--concurrency N]
-  gbrain jobs supervisor [--concurrency N] [--queue Q] [--pid-file PATH]
+  gbrain jobs supervisor [start] [--detach] [--json]
+                         [--concurrency N] [--queue Q] [--pid-file PATH]
                          [--max-crashes N] [--health-interval N]
-                         [--allow-shell-jobs] [--cli-path PATH] [--json]
+                         [--allow-shell-jobs] [--cli-path PATH]
+  gbrain jobs supervisor status [--json] [--pid-file PATH]
+  gbrain jobs supervisor stop [--json] [--pid-file PATH]
 
     Auto-restarting wrapper around `gbrain jobs work`. Spawns the worker
     as a child process and restarts on crash with exponential backoff
     (1s → 60s cap). Writes a PID file to `~/.gbrain/supervisor.pid` by
     default (override via --pid-file or GBRAIN_SUPERVISOR_PID_FILE env).
+    Lifecycle events are appended to
+      ${GBRAIN_AUDIT_DIR:-~/.gbrain/audit}/supervisor-YYYY-Www.jsonl
 
-    EXIT CODES
+    SUBCOMMANDS
+      start        (default) Launch the supervisor. --detach returns a
+                   JSON {event, supervisor_pid, pid_file} payload on
+                   stdout and forks; omit for foreground.
+      status       Read PID file + audit log, report running / last_start
+                   / crashes_24h / max_crashes_exceeded as JSON or human.
+                   Exits 0 if running, 1 if not.
+      stop         Send SIGTERM to the supervisor, wait up to 40s for
+                   graceful drain, report outcome. Exits 0 on clean stop.
+
+    EXIT CODES (start)
       0  clean shutdown (SIGTERM/SIGINT received, worker drained)
       1  max crashes exceeded (worker kept dying)
       2  another supervisor holds the PID lock
       3  PID file unwritable (permission / path error)
 
     EXAMPLES
-      gbrain jobs supervisor --concurrency 4      # human-friendly, blocks
-      gbrain jobs supervisor --json               # JSONL lifecycle events on stderr
-      gbrain jobs supervisor --allow-shell-jobs   # opt in to shell-exec handler
+      gbrain jobs supervisor --concurrency 4         # foreground (Ctrl-C stops)
+      gbrain jobs supervisor start --detach --json   # agent-friendly: fork + return JSON
+      gbrain jobs supervisor status --json           # machine-readable health check
+      gbrain jobs supervisor stop                    # graceful stop
+      gbrain jobs supervisor --json --allow-shell-jobs  # JSONL events + shell-exec on
 
 HANDLER TYPES (built in)
   sync              Pull and embed new pages from the repo
@@ -501,34 +518,168 @@ HANDLER TYPES (built in)
     }
 
     case 'supervisor': {
+      // Dispatcher for supervisor subcommands:
+      //   gbrain jobs supervisor                    → foreground start (back-compat)
+      //   gbrain jobs supervisor start [--detach]   → foreground or detached start
+      //   gbrain jobs supervisor status             → JSON liveness + queue stats
+      //   gbrain jobs supervisor stop               → SIGTERM + drain wait
+      const { MinionSupervisor, DEFAULT_PID_FILE } = await import('../core/minions/supervisor.ts');
+      const { writeSupervisorEvent } = await import('../core/minions/handlers/supervisor-audit.ts');
+
+      const supCmd = args[1];
+      const isStatusCmd = supCmd === 'status';
+      const isStopCmd = supCmd === 'stop';
+      const isStartCmd = supCmd === 'start' || supCmd === undefined || supCmd === '--detach' ||
+                          (typeof supCmd === 'string' && supCmd.startsWith('--'));
+      const jsonMode = hasFlag(args, '--json');
+      const pidFile = parseFlag(args, '--pid-file') ?? DEFAULT_PID_FILE;
+
+      // ----- status subcommand -----
+      if (isStatusCmd) {
+        const { existsSync, readFileSync } = await import('fs');
+        const { readSupervisorEvents } = await import('../core/minions/handlers/supervisor-audit.ts');
+
+        let supervisorPid: number | null = null;
+        let running = false;
+        if (existsSync(pidFile)) {
+          try {
+            const line = readFileSync(pidFile, 'utf8').trim().split('\n')[0];
+            const parsed = parseInt(line, 10);
+            if (!isNaN(parsed) && parsed > 0) {
+              supervisorPid = parsed;
+              try { process.kill(parsed, 0); running = true; } catch { running = false; }
+            }
+          } catch { /* unreadable PID file */ }
+        }
+
+        const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
+        const lastStart = events.filter(e => e.event === 'started').pop()?.ts ?? null;
+        const crashes24h = events.filter(e => e.event === 'worker_exited').length;
+        const maxCrashesEvent = events.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
+
+        const status = {
+          running,
+          supervisor_pid: supervisorPid,
+          pid_file: pidFile,
+          last_start: lastStart,
+          crashes_24h: crashes24h,
+          max_crashes_exceeded: !!maxCrashesEvent,
+        };
+
+        if (jsonMode) {
+          console.log(JSON.stringify(status, null, 2));
+        } else {
+          console.log(`Supervisor: ${running ? 'running' : 'not running'}`);
+          if (supervisorPid) console.log(`  PID:           ${supervisorPid}`);
+          console.log(`  PID file:      ${pidFile}`);
+          if (lastStart) console.log(`  Last start:    ${lastStart}`);
+          console.log(`  Crashes (24h): ${crashes24h}`);
+          if (maxCrashesEvent) console.log(`  ⚠ Max crashes exceeded at ${maxCrashesEvent.ts}`);
+        }
+        process.exit(running ? 0 : 1);
+      }
+
+      // ----- stop subcommand -----
+      if (isStopCmd) {
+        const { existsSync, readFileSync } = await import('fs');
+        if (!existsSync(pidFile)) {
+          const payload = { stopped: false, reason: 'pid_file_missing', pid_file: pidFile };
+          if (jsonMode) console.log(JSON.stringify(payload));
+          else console.error(`No PID file at ${pidFile}; supervisor not running.`);
+          process.exit(1);
+        }
+        let supervisorPid: number;
+        try {
+          supervisorPid = parseInt(readFileSync(pidFile, 'utf8').trim().split('\n')[0], 10);
+          if (isNaN(supervisorPid) || supervisorPid <= 0) throw new Error('invalid pid');
+        } catch (err) {
+          const payload = { stopped: false, reason: 'pid_file_corrupt', error: String(err) };
+          if (jsonMode) console.log(JSON.stringify(payload));
+          else console.error(`PID file corrupt: ${err}`);
+          process.exit(1);
+        }
+
+        try { process.kill(supervisorPid, 'SIGTERM'); }
+        catch (err: unknown) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          const payload = {
+            stopped: false,
+            reason: code === 'ESRCH' ? 'process_gone' : 'kill_failed',
+            supervisor_pid: supervisorPid,
+          };
+          if (jsonMode) console.log(JSON.stringify(payload));
+          else console.error(`Cannot signal PID ${supervisorPid}: ${err}`);
+          process.exit(code === 'ESRCH' ? 0 : 1);
+        }
+
+        // Poll for up to 40s (supervisor's own 35s drain + 5s slack).
+        const deadline = Date.now() + 40_000;
+        let stoppedCleanly = false;
+        while (Date.now() < deadline) {
+          try { process.kill(supervisorPid, 0); }
+          catch { stoppedCleanly = true; break; }
+          await new Promise(r => setTimeout(r, 250));
+        }
+
+        const payload = {
+          stopped: stoppedCleanly,
+          supervisor_pid: supervisorPid,
+          reason: stoppedCleanly ? 'drained' : 'timeout_40s',
+        };
+        if (jsonMode) console.log(JSON.stringify(payload));
+        else console.log(stoppedCleanly ? `Supervisor ${supervisorPid} stopped.` : `Supervisor ${supervisorPid} did not exit within 40s.`);
+        process.exit(stoppedCleanly ? 0 : 1);
+      }
+
+      // ----- start subcommand (default) -----
+      if (!isStartCmd) {
+        console.error(`Unknown supervisor subcommand: ${supCmd}. Expected: start, status, stop.`);
+        process.exit(1);
+      }
+
       const config = (await import('../core/config.ts')).loadConfig();
       if (config?.engine === 'pglite') {
         console.error('Error: Supervisor requires Postgres. PGLite uses an exclusive file lock that blocks other processes.');
         process.exit(1);
       }
 
-      const { MinionSupervisor, DEFAULT_PID_FILE } = await import('../core/minions/supervisor.ts');
       const { resolveGbrainCliPath } = await import('./autopilot.ts');
 
       const concurrency = parseInt(parseFlag(args, '--concurrency') ?? '2', 10);
       const queueName = parseFlag(args, '--queue') ?? 'default';
-      // Three-tier PID path resolution: --pid-file > GBRAIN_SUPERVISOR_PID_FILE > ~/.gbrain/supervisor.pid.
-      // DEFAULT_PID_FILE already checks the env var, so we only need the flag-vs-default branch here.
-      const pidFile = parseFlag(args, '--pid-file') ?? DEFAULT_PID_FILE;
       const maxCrashes = parseInt(parseFlag(args, '--max-crashes') ?? '10', 10);
       const healthInterval = parseInt(parseFlag(args, '--health-interval') ?? '60000', 10);
-      const jsonMode = hasFlag(args, '--json');
-      // --allow-shell-jobs opts the child worker into the shell handler. Falls back to the
-      // env var for backwards compat (agent scripts that set GBRAIN_ALLOW_SHELL_JOBS=1).
       const allowShellJobs = hasFlag(args, '--allow-shell-jobs') ||
                              !!process.env.GBRAIN_ALLOW_SHELL_JOBS;
+      const detach = hasFlag(args, '--detach');
 
-      // CLI path resolution: explicit --cli-path wins; otherwise resolveGbrainCliPath()
-      // throws a clear install-hint message if it can't find a compiled binary. We let
-      // that throw propagate rather than falling back to process.argv[1] (which in dev
-      // is a .ts source, not a valid spawn target — see codex finding #5).
       const cliPath = parseFlag(args, '--cli-path') ?? resolveGbrainCliPath();
 
+      // --detach: fork a background supervisor, print PID payload, exit 0.
+      // Implementation: re-exec the same CLI as a detached child without --detach,
+      // inheriting stderr (so JSONL events still flow to the parent's tail-f
+      // if they wanted to follow logs) but detaching stdin/stdout.
+      if (detach) {
+        const { spawn } = await import('child_process');
+        const childArgs = process.argv.slice(2).filter(a => a !== '--detach');
+        const child = spawn(process.execPath, [process.argv[1], ...childArgs], {
+          detached: true,
+          stdio: ['ignore', 'ignore', 'inherit'],
+          env: process.env,
+        });
+        child.unref();
+        const payload = {
+          event: 'started',
+          supervisor_pid: child.pid,
+          pid_file: pidFile,
+          detached: true,
+        };
+        console.log(JSON.stringify(payload));
+        process.exit(0);
+      }
+
+      // Foreground start.
+      const supervisorPid = process.pid;
       const supervisor = new MinionSupervisor(engine, {
         concurrency,
         queue: queueName,
@@ -538,6 +689,7 @@ HANDLER TYPES (built in)
         cliPath,
         allowShellJobs,
         json: jsonMode,
+        onEvent: (emission) => writeSupervisorEvent(emission, supervisorPid),
       });
 
       await supervisor.start();
