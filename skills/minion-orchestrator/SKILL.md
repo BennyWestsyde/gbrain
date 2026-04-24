@@ -99,33 +99,38 @@ tasks where no LLM reasoning loop is needed.
     The daemon mode is not available on PGLite (exclusive file lock). See
     `docs/guides/minions-shell-jobs.md`.
 - **MCP boundary:** shell-job submission is CLI-only. `submit_job name="shell"`
-  over MCP returns `permission_denied` because `shell` is in
-  `PROTECTED_JOB_NAMES`. Agents CAN observe shell jobs via `get_job` /
-  `list_jobs` / `get_job_progress` (not protected), but cannot submit them.
-  Operator or autopilot submits; agent observes.
+  over MCP throws an `OperationError` with code `permission_denied` ("'shell'
+  jobs cannot be submitted over MCP") because `shell` is in `PROTECTED_JOB_NAMES`.
+  Agents CAN observe shell jobs via `get_job` / `list_jobs` / `get_job_progress`
+  (not protected), but cannot submit them. Operator or autopilot submits;
+  agent observes.
 - **Verify setup:** after configuration, run `gbrain jobs stats` (CLI) to
   confirm the worker is registered and consuming the queue.
 
 ### Submit (CLI, operator or autopilot)
 
+Shell jobs take their command via `--params` as a JSON object with `cmd` (string)
+or `argv` (array), plus `cwd` and optional `env`.
+
 Command string form:
 ```
-gbrain jobs submit shell --cmd "echo hello" --cwd /abs/path
+gbrain jobs submit shell --params '{"cmd":"echo hello","cwd":"/abs/path"}'
 ```
 
 Argv form (no shell expansion):
 ```
-gbrain jobs submit shell --argv '["bash","-lc","echo hello"]' --cwd /abs/path
+gbrain jobs submit shell --params '{"argv":["bash","-lc","echo hello"],"cwd":"/abs/path"}'
 ```
 
 Inline execution on PGLite or any one-shot deployment:
 ```
-gbrain jobs submit shell --cmd "echo hello" --follow
+gbrain jobs submit shell --params '{"cmd":"echo hello","cwd":"/tmp"}' --follow
 ```
 
-Queue/lifecycle flags (`--queue`, `--priority`, `--max-attempts`, `--delay`,
-`--timeout-ms`, `--backoff-type`, `--backoff-delay`, `--idempotency-key`)
-all work; see `gbrain jobs submit --help`.
+Queue/lifecycle flags exposed by `gbrain jobs submit --help`: `--queue`,
+`--priority`, `--delay`, `--max-attempts`, `--max-stalled`, `--backoff-type`,
+`--backoff-delay`, `--backoff-jitter`, `--timeout-ms`, `--idempotency-key`,
+`--dry-run`.
 
 ### Monitor (agents or operator)
 
@@ -166,8 +171,14 @@ supplies.
 ## Phase 1: Submit
 
 ```
-gbrain agent run "Research Acme Corp revenue" --tools "search,web_search"
+gbrain agent run "Research Acme Corp revenue" --tools "search,query"
 ```
+
+`--tools` accepts a comma-separated subset of `BRAIN_TOOL_ALLOWLIST` (see
+`src/core/minions/tools/brain-allowlist.ts`): `query`, `search`, `get_page`,
+`list_pages`, `file_list`, `file_url`, `get_backlinks`, `traverse_graph`,
+`resolve_slugs`, `get_ingest_log`, `put_page`. Anything outside the allow-list
+is rejected at submit time with `allowed_tools references unknown tool`.
 
 For parallel work with a fan-out manifest:
 ```
@@ -180,12 +191,19 @@ and claims AFTER every child terminates. See
 `src/core/minions/handlers/subagent.ts` and
 `src/core/minions/handlers/subagent-aggregator.ts`.
 
-Flags:
-- `--queue` — queue name (default: 'default')
-- `--priority` — lower = higher priority (default: 0)
-- `--max-attempts` — retry limit (default: 3)
-- `--delay` — ms delay before eligible
-- `--follow` — stream logs + wait for completion (default on TTY)
+Flags (from `src/commands/agent.ts`):
+- `--subagent-def <name>` — named subagent definition
+- `--model <id>` — override model
+- `--max-turns <N>` — cap the LLM loop
+- `--tools <csv>` — allow-listed brain tools (see above)
+- `--timeout-ms <N>` — hard timeout per job
+- `--fanout-manifest <file>` — N children + 1 aggregator
+- `--follow` / `--no-follow` — stream logs + wait (default on TTY)
+- `--detach` — submit and return immediately
+
+Queue/priority/retry tuning is not exposed by `gbrain agent run`; submit the
+raw `subagent` handler via `gbrain jobs submit` (requires CLI trust) if you
+need those knobs.
 
 ## Phase 2: Monitor
 

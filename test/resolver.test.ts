@@ -61,7 +61,11 @@ describe("RESOLVER.md trigger round-trip (D5/C)", () => {
   const rows: Row[] = (() => {
     if (!existsSync(RESOLVER_PATH)) return [];
     const content = readFileSync(RESOLVER_PATH, "utf-8");
-    const rowRe = /^\s*\|\s*([^|]+?)\s*\|\s*`([^`]+\.md)`\s*\|\s*$/gm;
+    // Tolerate trailing annotations after the backtick path (e.g.,
+    // `` `skills/maintain/SKILL.md` (extraction sections) |``). The path cell
+    // starts with a backtick-quoted `.md` ref; anything between that and the
+    // closing `|` is free-form prose and is intentionally ignored.
+    const rowRe = /^\s*\|\s*([^|]+?)\s*\|\s*`([^`]+\.md)`[^|]*\|\s*$/gm;
     const out: Row[] = [];
     let m: RegExpExecArray | null;
     while ((m = rowRe.exec(content)) !== null) {

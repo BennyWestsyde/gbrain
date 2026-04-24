@@ -13,7 +13,7 @@
  * Run: bun test test/e2e/minions-shell-pglite.test.ts
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { MinionWorker } from '../../src/core/minions/worker.ts';
@@ -55,6 +55,14 @@ afterAll(async () => {
 });
 
 describe('E2E: Minions shell handler on PGLite (--follow inline path)', () => {
+  // Mirror the Postgres sibling's per-test reset. The engine is shared across
+  // both tests via beforeAll; without this, completed jobs from one test leak
+  // into minion_jobs and future test additions hit order-dependency.
+  beforeEach(async () => {
+    const db = (engine as any).db;
+    await db.exec(`DELETE FROM minion_attachments; DELETE FROM minion_inbox; DELETE FROM minion_jobs;`);
+  });
+
   test('submit → worker registered via registerBuiltinHandlers → shell runs → completes', async () => {
     const queue = new MinionQueue(engine);
     const job = await queue.add(
