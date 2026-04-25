@@ -20,6 +20,8 @@ import type {
   EngineConfig,
 } from './types.ts';
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult } from './utils.ts';
+import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
+import { buildSourceFactorCase, buildHardExcludeClause } from './search/sql-ranking.ts';
 
 type PGLiteDB = PGlite;
 
@@ -221,17 +223,23 @@ export class PGLiteEngine implements BrainEngine {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
     }
 
+    // Source-aware ranking — see postgres-engine.ts for rationale.
+    const boostMap = resolveBoostMap();
+    const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
+    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
+    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+
     const { rows } = await this.db.query(
       `SELECT
         p.slug, p.id as page_id, p.title, p.type, p.source_id,
         cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-        ts_rank(p.search_vector, websearch_to_tsquery('english', $1)) AS score,
+        ts_rank(p.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score,
         CASE WHEN p.updated_at < (
           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
         ) THEN true ELSE false END AS stale
       FROM pages p
       JOIN content_chunks cc ON cc.page_id = p.id
-      WHERE p.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
+      WHERE p.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter} ${hardExcludeClause}
       ORDER BY score DESC
       LIMIT $2
       OFFSET $3`,
@@ -251,21 +259,39 @@ export class PGLiteEngine implements BrainEngine {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
     }
 
+    // Two-stage CTE: pure-distance ORDER BY in inner CTE preserves HNSW
+    // index usage; outer SELECT applies source-boost on the narrow candidate
+    // pool. See postgres-engine.ts searchVector for rationale.
+    const boostMap = resolveBoostMap();
+    const sourceFactorCaseOnSlug = buildSourceFactorCase('slug', boostMap, opts?.detail);
+    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
+    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+    const innerLimit = offset + Math.max(limit * 5, 100);
+
     const { rows } = await this.db.query(
-      `SELECT
-        p.slug, p.id as page_id, p.title, p.type, p.source_id,
-        cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-        1 - (cc.embedding <=> $1::vector) AS score,
-        CASE WHEN p.updated_at < (
-          SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
+      `WITH hnsw_candidates AS (
+        SELECT
+          p.slug, p.id as page_id, p.title, p.type, p.source_id, p.updated_at,
+          cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+          1 - (cc.embedding <=> $1::vector) AS raw_score
+        FROM content_chunks cc
+        JOIN pages p ON p.id = cc.page_id
+        WHERE cc.embedding IS NOT NULL ${detailFilter} ${hardExcludeClause}
+        ORDER BY cc.embedding <=> $1::vector
+        LIMIT $2
+      )
+      SELECT
+        slug, page_id, title, type, source_id,
+        chunk_id, chunk_index, chunk_text, chunk_source,
+        raw_score * ${sourceFactorCaseOnSlug} AS score,
+        CASE WHEN updated_at < (
+          SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = page_id
         ) THEN true ELSE false END AS stale
-      FROM content_chunks cc
-      JOIN pages p ON p.id = cc.page_id
-      WHERE cc.embedding IS NOT NULL ${detailFilter}
-      ORDER BY cc.embedding <=> $1::vector
-      LIMIT $2
-      OFFSET $3`,
-      [vecStr, limit, offset]
+      FROM hnsw_candidates
+      ORDER BY score DESC
+      LIMIT $3
+      OFFSET $4`,
+      [vecStr, innerLimit, limit, offset]
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
