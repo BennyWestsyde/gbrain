@@ -1,4 +1,4 @@
-import { existsSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
@@ -14,6 +14,7 @@ import {
 import type { SyncManifest } from '../core/sync.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import { loadStorageConfig } from '../core/storage-config.ts';
 
 export interface SyncResult {
   status: 'up_to_date' | 'synced' | 'first_sync' | 'dry_run' | 'blocked_by_failures';
@@ -596,6 +597,45 @@ export async function runSync(engine: BrainEngine, args: string[]) {
       }
     }
     await new Promise(r => setTimeout(r, interval * 1000));
+  }
+}
+
+/**
+ * Auto-manage .gitignore entries for supabase-only directories
+ */
+async function manageGitignore(repoPath: string): Promise<void> {
+  const storageConfig = loadStorageConfig(repoPath);
+  if (!storageConfig || storageConfig.supabase_only.length === 0) {
+    return;
+  }
+
+  const gitignorePath = join(repoPath, '.gitignore');
+  let gitignoreContent = '';
+  
+  // Read existing .gitignore
+  if (existsSync(gitignorePath)) {
+    gitignoreContent = readFileSync(gitignorePath, 'utf-8');
+  }
+  
+  // Check which supabase-only directories are missing from .gitignore
+  const linesToAdd: string[] = [];
+  const existingLines = new Set(gitignoreContent.split('\n').map(line => line.trim()));
+  
+  for (const dir of storageConfig.supabase_only) {
+    if (!existingLines.has(dir) && !existingLines.has(`/${dir}`)) {
+      linesToAdd.push(dir);
+    }
+  }
+  
+  // Add missing entries
+  if (linesToAdd.length > 0) {
+    if (gitignoreContent && !gitignoreContent.endsWith('\n')) {
+      gitignoreContent += '\n';
+    }
+    gitignoreContent += '\n# Auto-managed by gbrain (supabase-only directories)\n';
+    gitignoreContent += linesToAdd.join('\n') + '\n';
+    
+    writeFileSync(gitignorePath, gitignoreContent);
   }
 }
 

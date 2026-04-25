@@ -1,0 +1,14 @@
+storage:
+  git_tracked:
+    - people/
+    - companies/
+    - deals/
+    - concepts/
+    - yc/
+    - ideas/
+    - projects/
+    
+  supabase_only:
+    - media/x/
+    - media/articles/
+    - meetings/transcripts/
