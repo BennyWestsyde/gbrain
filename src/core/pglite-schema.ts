@@ -4,7 +4,7 @@
  * Differences from Postgres:
  * - No RLS block (no role system in embedded PGLite)
  * - No access_tokens / mcp_request_log (local-only, no remote auth)
- * - No files table (file attachments require Supabase Storage)
+ * - files table present but no cloud upload (metadata-only for local use)
  * - No pg_advisory_lock (single connection)
  *
  * Everything else is identical: same tables, triggers, indexes, pgvector HNSW, tsvector GIN.
@@ -151,6 +151,27 @@ CREATE TABLE IF NOT EXISTS ingest_log (
   summary       TEXT    NOT NULL DEFAULT '',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================
+-- files: binary attachments (metadata only for local PGLite; no cloud upload)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS files (
+  id           SERIAL PRIMARY KEY,
+  page_slug    TEXT   REFERENCES pages(slug) ON DELETE SET NULL ON UPDATE CASCADE,
+  filename     TEXT   NOT NULL,
+  storage_path TEXT   NOT NULL,
+  mime_type    TEXT,
+  size_bytes   BIGINT,
+  content_hash TEXT   NOT NULL,
+  metadata     JSONB  NOT NULL DEFAULT '{}',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(storage_path)
+);
+
+ALTER TABLE files DROP COLUMN IF EXISTS storage_url;
+
+CREATE INDEX IF NOT EXISTS idx_files_page ON files(page_slug);
+CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 
 -- ============================================================
 -- config: brain-level settings

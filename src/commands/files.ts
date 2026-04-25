@@ -2,7 +2,6 @@ import { readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSy
 import { join, relative, extname, basename, dirname } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
-import * as db from '../core/db.ts';
 import { humanSize } from '../core/file-resolver.ts';
 
 /** Size threshold: files >= 100 MB use TUS resumable upload */
@@ -45,16 +44,16 @@ export async function runFiles(engine: BrainEngine, args: string[]) {
 
   switch (subcommand) {
     case 'list':
-      await listFiles(args[1]);
+      await listFiles(engine, args[1]);
       break;
     case 'upload':
-      await uploadFile(args.slice(1));
+      await uploadFile(engine, args.slice(1));
       break;
     case 'sync':
-      await syncFiles(args[1]);
+      await syncFiles(engine, args[1]);
       break;
     case 'verify':
-      await verifyFiles();
+      await verifyFiles(engine);
       break;
     case 'mirror':
       await mirrorFiles(args.slice(1));
@@ -72,7 +71,7 @@ export async function runFiles(engine: BrainEngine, args: string[]) {
       await cleanFiles(args.slice(1));
       break;
     case 'upload-raw':
-      await uploadRaw(args.slice(1));
+      await uploadRaw(engine, args.slice(1));
       break;
     case 'signed-url':
       await signedUrl(args.slice(1));
@@ -98,13 +97,12 @@ export async function runFiles(engine: BrainEngine, args: string[]) {
   }
 }
 
-async function listFiles(slug?: string) {
-  const sql = db.getConnection();
-  let rows;
+async function listFiles(engine: BrainEngine, slug?: string) {
+  let rows: Record<string, unknown>[];
   if (slug) {
-    rows = await sql`SELECT * FROM files WHERE page_slug = ${slug} ORDER BY filename LIMIT 100`;
+    rows = await engine.executeRaw('SELECT * FROM files WHERE page_slug = $1 ORDER BY filename LIMIT 100', [slug]);
   } else {
-    rows = await sql`SELECT * FROM files ORDER BY page_slug, filename LIMIT 100`;
+    rows = await engine.executeRaw('SELECT * FROM files ORDER BY page_slug, filename LIMIT 100');
   }
 
   if (rows.length === 0) {
@@ -119,7 +117,7 @@ async function listFiles(slug?: string) {
   }
 }
 
-async function uploadFile(args: string[]) {
+async function uploadFile(engine: BrainEngine, args: string[]) {
   const filePath = args.find(a => !a.startsWith('--'));
   const pageSlug = args.find((a, i) => args[i - 1] === '--page') || null;
 
@@ -134,10 +132,11 @@ async function uploadFile(args: string[]) {
   const storagePath = pageSlug ? `${pageSlug}/${filename}` : `unsorted/${hash.slice(0, 8)}-${filename}`;
   const mimeType = getMimeType(filePath);
 
-  const sql = db.getConnection();
-
   // Check for existing file by hash
-  const existing = await sql`SELECT id FROM files WHERE content_hash = ${hash} AND storage_path = ${storagePath}`;
+  const existing = await engine.executeRaw<{ id: number }>(
+    'SELECT id FROM files WHERE content_hash = $1 AND storage_path = $2',
+    [hash, storagePath]
+  );
   if (existing.length > 0) {
     console.log(`File already uploaded (hash match): ${storagePath}`);
     return;
@@ -155,14 +154,15 @@ async function uploadFile(args: string[]) {
     await storage.upload(storagePath, content, mimeType || undefined);
   }
 
-  await sql`
-    INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
-    VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
-    ON CONFLICT (storage_path) DO UPDATE SET
-      content_hash = EXCLUDED.content_hash,
-      size_bytes = EXCLUDED.size_bytes,
-      mime_type = EXCLUDED.mime_type
-  `;
+  await engine.executeRaw(
+    `INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, '{}')
+     ON CONFLICT (storage_path) DO UPDATE SET
+       content_hash = EXCLUDED.content_hash,
+       size_bytes = EXCLUDED.size_bytes,
+       mime_type = EXCLUDED.mime_type`,
+    [pageSlug, filename, storagePath, mimeType, stat.size, hash]
+  );
 
   console.log(`Uploaded: ${storagePath} (${humanSize(stat.size)})`);
 }
@@ -176,7 +176,7 @@ async function uploadFile(args: string[]) {
  *
  * The .redirect.yaml pointer stays in the brain repo so git tracks what was stored.
  */
-async function uploadRaw(args: string[]) {
+async function uploadRaw(engine: BrainEngine, args: string[]) {
   const filePath = args.find(a => !a.startsWith('--'));
   const pageSlug = args.find((a, i) => args[i - 1] === '--page') || null;
   const fileType = args.find((a, i) => args[i - 1] === '--type') || null;
@@ -247,16 +247,16 @@ async function uploadRaw(args: string[]) {
   }
 
   // Record in DB
-  const sql = db.getConnection();
-  await sql`
-    INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
-    VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${'sha256:' + hash},
-            ${sql.json({ type: fileType, upload_method: method })})
-    ON CONFLICT (storage_path) DO UPDATE SET
-      content_hash = EXCLUDED.content_hash,
-      size_bytes = EXCLUDED.size_bytes,
-      mime_type = EXCLUDED.mime_type
-  `;
+  await engine.executeRaw(
+    `INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+     ON CONFLICT (storage_path) DO UPDATE SET
+       content_hash = EXCLUDED.content_hash,
+       size_bytes = EXCLUDED.size_bytes,
+       mime_type = EXCLUDED.mime_type`,
+    [pageSlug, filename, storagePath, mimeType, stat.size, 'sha256:' + hash,
+     JSON.stringify({ type: fileType, upload_method: method })]
+  );
 
   // Output JSON for scripting
   console.log(JSON.stringify({
@@ -294,7 +294,7 @@ async function signedUrl(args: string[]) {
   console.log(url);
 }
 
-async function syncFiles(dir?: string) {
+async function syncFiles(engine: BrainEngine, dir?: string) {
   if (!dir || !existsSync(dir)) {
     console.error('Usage: gbrain files sync <directory>');
     process.exit(1);
@@ -320,25 +320,26 @@ async function syncFiles(dir?: string) {
     const mimeType = getMimeType(filePath);
     const stat = statSync(filePath);
 
-    const sql = db.getConnection();
-    const existing = await sql`SELECT id FROM files WHERE content_hash = ${hash} AND storage_path = ${storagePath}`;
+    const existing = await engine.executeRaw<{ id: number }>(
+      'SELECT id FROM files WHERE content_hash = $1 AND storage_path = $2',
+      [hash, storagePath]
+    );
     if (existing.length > 0) {
       skipped++;
       continue;
     }
 
-    // Infer page slug from directory structure
-    const pathParts = relativePath.split('/');
-    const pageSlug = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : null;
+    const pageSlug = null;
 
-    await sql`
-      INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
-      VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
-      ON CONFLICT (storage_path) DO UPDATE SET
-        content_hash = EXCLUDED.content_hash,
-        size_bytes = EXCLUDED.size_bytes,
-        mime_type = EXCLUDED.mime_type
-    `;
+    await engine.executeRaw(
+      `INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, '{}')
+       ON CONFLICT (storage_path) DO UPDATE SET
+         content_hash = EXCLUDED.content_hash,
+         size_bytes = EXCLUDED.size_bytes,
+         mime_type = EXCLUDED.mime_type`,
+      [pageSlug, filename, storagePath, mimeType, stat.size, hash]
+    );
 
     uploaded++;
   }
@@ -346,9 +347,8 @@ async function syncFiles(dir?: string) {
   console.log(`\n\nFiles sync complete: ${uploaded} uploaded, ${skipped} skipped (unchanged)`);
 }
 
-async function verifyFiles() {
-  const sql = db.getConnection();
-  const rows = await sql`SELECT * FROM files ORDER BY storage_path LIMIT 1000`;
+async function verifyFiles(engine: BrainEngine) {
+  const rows = await engine.executeRaw('SELECT * FROM files ORDER BY storage_path LIMIT 1000');
 
   if (rows.length === 0) {
     console.log('No files to verify.');

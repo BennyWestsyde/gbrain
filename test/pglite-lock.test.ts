@@ -2,7 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { acquireLock, releaseLock, type LockHandle } from '../src/core/pglite-lock';
+import { acquireLock, releaseLock } from '../src/core/pglite-lock';
+import { PGLiteEngine } from '../src/core/pglite-engine';
 
 const TEST_DIR = join(tmpdir(), 'gbrain-lock-test-' + process.pid);
 
@@ -48,12 +49,25 @@ describe('pglite-lock', () => {
     await releaseLock(lock1);
   });
 
+  test('does not remove an old lock from a live process', async () => {
+    const lockDir = join(TEST_DIR, '.gbrain-lock');
+    mkdirSync(lockDir);
+    writeFileSync(join(lockDir, 'lock'), JSON.stringify({
+      pid: process.pid,
+      acquired_at: Date.now() - 60 * 60 * 1000,
+      command: 'test-live-lock',
+    }));
+
+    await expect(acquireLock(TEST_DIR, { timeoutMs: 1000 })).rejects.toThrow(/test-live-lock/);
+    expect(existsSync(lockDir)).toBe(true);
+  });
+
   test('detects and cleans stale lock from dead process', async () => {
     // Simulate a stale lock from a dead process
     const lockDir = join(TEST_DIR, '.gbrain-lock');
     mkdirSync(lockDir);
     writeFileSync(join(lockDir, 'lock'), JSON.stringify({
-      pid: 999999999, // Non-existent PID
+      pid: 999_999_999, // Non-existent PID
       acquired_at: Date.now(),
       command: 'test',
     }));
@@ -79,10 +93,31 @@ describe('pglite-lock', () => {
     const lockData = JSON.parse(readFileSync(join(TEST_DIR, '.gbrain-lock', 'lock'), 'utf-8'));
 
     expect(lockData.pid).toBe(process.pid);
+    expect(lockData.owner_token).toBe(lock.ownerToken);
     expect(lockData.acquired_at).toBeDefined();
     expect(lockData.command).toBeDefined();
 
     await releaseLock(lock);
+  });
+
+  test('does not release a lock now owned by another acquisition', async () => {
+    const lock = await acquireLock(TEST_DIR);
+    const lockDir = join(TEST_DIR, '.gbrain-lock');
+    const lockPath = join(lockDir, 'lock');
+
+    rmSync(lockDir, { recursive: true, force: true });
+    mkdirSync(lockDir);
+    writeFileSync(lockPath, JSON.stringify({
+      pid: process.pid,
+      owner_token: 'new-owner',
+      acquired_at: Date.now(),
+      command: 'new-owner-command',
+    }));
+
+    await releaseLock(lock);
+    expect(existsSync(lockDir)).toBe(true);
+
+    rmSync(lockDir, { recursive: true, force: true });
   });
 
   test('releases lock on disconnect even if DB close fails', async () => {
@@ -97,5 +132,13 @@ describe('pglite-lock', () => {
     const lock2 = await acquireLock(TEST_DIR);
     expect(lock2.acquired).toBe(true);
     await releaseLock(lock2);
+  });
+
+  test('engine connect releases lock when startup fails after acquisition', async () => {
+    writeFileSync(join(TEST_DIR, 'postmaster.pid'), `${process.pid}\n`);
+
+    const engine = new PGLiteEngine();
+    await expect(engine.connect({ engine: 'pglite', database_path: TEST_DIR })).rejects.toThrow(/already in use/);
+    expect(existsSync(join(TEST_DIR, '.gbrain-lock'))).toBe(false);
   });
 });

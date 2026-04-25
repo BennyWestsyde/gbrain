@@ -338,13 +338,17 @@ async function handleCliOnly(command: string, args: string[]) {
       // "user chose --fast while config is present".
       await runDoctor(null, args, getDbUrlSource());
     } else {
+      let eng: BrainEngine | null = null;
       try {
-        const eng = await connectEngine();
+        eng = await connectEngine();
         await runDoctor(eng, args);
-        await eng.disconnect();
       } catch {
         // DB unavailable — still run filesystem checks
         await runDoctor(null, args, getDbUrlSource());
+      } finally {
+        if (eng) {
+          try { await eng.disconnect(); } catch { /* best-effort */ }
+        }
       }
     }
     return;

@@ -1,6 +1,8 @@
 import { readFileSync, statSync, lstatSync } from 'fs';
+import { extname } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine } from './engine.ts';
+import { isSupportedBinary, extractText } from './extract-text.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { embedBatch } from './embedding.ts';
@@ -179,6 +181,21 @@ export async function importFromFile(
   }
 
   const stat = statSync(filePath);
+  const ext = extname(filePath).toLowerCase();
+
+  // Binary file path: extract text, then treat as markdown content
+  if (isSupportedBinary(filePath)) {
+    const slug = slugifyPath(relativePath);
+    let extracted: string;
+    try {
+      extracted = await extractText(filePath);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { slug, status: 'skipped', chunks: 0, error: `Text extraction failed: ${msg}` };
+    }
+    return importFromContent(engine, slug, extracted, opts);
+  }
+
   if (stat.size > MAX_FILE_SIZE) {
     return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)` };
   }

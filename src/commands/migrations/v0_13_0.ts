@@ -25,7 +25,7 @@
  * not one-time schema+backfill work.
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 // Bug 3 — ledger writes moved to the runner (apply-migrations.ts). The
 // orchestrator returns its result and the runner persists it.
@@ -41,12 +41,29 @@ import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhase
 // an older installed copy via alias shadowing or stale PATH cache. The
 // active process.execPath is the one that loaded THIS migration module,
 // so recursing into it is always the right binary.
-const GBRAIN = process.execPath;
+function gbrainCommand(): { command: string; baseArgs: string[] } {
+  const entry = process.argv[1];
+  if (entry?.endsWith('.ts')) {
+    return { command: process.execPath, baseArgs: [entry] };
+  }
+  return { command: process.execPath, baseArgs: [] };
+}
+
+function runGbrain(args: string[], opts: { timeout: number; encoding?: BufferEncoding }):
+  string | Buffer {
+  const { command, baseArgs } = gbrainCommand();
+  return execFileSync(command, [...baseArgs, ...args], {
+    stdio: opts.encoding ? 'pipe' : 'inherit',
+    encoding: opts.encoding,
+    timeout: opts.timeout,
+    env: process.env,
+  });
+}
 
 function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
   if (opts.dryRun) return { name: 'schema', status: 'skipped', detail: 'dry-run' };
   try {
-    execSync(`${GBRAIN} init --migrate-only`, { stdio: 'inherit', timeout: 600_000, env: process.env });
+    runGbrain(['init', '--migrate-only'], { timeout: 600_000 });
     return { name: 'schema', status: 'complete' };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -63,10 +80,8 @@ function phaseBBackfill(opts: OrchestratorOpts): OrchestratorPhaseResult {
     // `--include-frontmatter` is the v0.13 flag that enables the canonical
     // frontmatter link extractor. Default-OFF in the CLI for back-compat;
     // the migration explicitly opts in because this is the canonical backfill.
-    execSync(`${GBRAIN} extract links --source db --include-frontmatter`, {
-      stdio: 'inherit',
+    runGbrain(['extract', 'links', '--source', 'db', '--include-frontmatter'], {
       timeout: 1_800_000,  // 30 min hard cap; typical 2-5 min on 46K pages
-      env: process.env,
     });
     return { name: 'frontmatter_backfill', status: 'complete' };
   } catch (e) {
@@ -88,9 +103,7 @@ function phaseCVerify(opts: OrchestratorOpts): OrchestratorPhaseResult {
     // docs-only brains, and brains with no entity pages legitimately
     // produce 0. Phase B's own stdout shows `Links: created N` which is
     // the authoritative signal — user sees it during upgrade.
-    const out = execSync(`${GBRAIN} call get_stats`, {
-      encoding: 'utf-8', timeout: 60_000, env: process.env,
-    });
+    const out = runGbrain(['call', 'get_stats'], { encoding: 'utf-8', timeout: 60_000 }) as string;
     const parsed = JSON.parse(out) as { link_count?: number; page_count?: number };
     const linkCount = parsed.link_count ?? 0;
     const pageCount = parsed.page_count ?? 0;

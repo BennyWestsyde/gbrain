@@ -14,16 +14,16 @@
  *   try { ... } finally { await releaseLock(lock); }
  */
 
-import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, statSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { randomUUID } from 'crypto';
 import { join } from 'path';
 
 const LOCK_DIR_NAME = '.gbrain-lock';
 const LOCK_FILE = 'lock';
-const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes — embed jobs can be long
-
 export interface LockHandle {
   lockDir: string;
   acquired: boolean;
+  ownerToken?: string;
 }
 
 function getLockDir(dataDir: string | undefined): string {
@@ -46,6 +46,15 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function describeLock(lockData: Record<string, unknown>): string {
+  const pid = lockData.pid;
+  const acquiredAt = typeof lockData.acquired_at === 'number'
+    ? new Date(lockData.acquired_at).toISOString()
+    : 'unknown time';
+  const command = typeof lockData.command === 'string' ? lockData.command : 'unknown command';
+  return `Process ${pid} has held it since ${acquiredAt} (command: ${command}).`;
+}
+
 /**
  * Attempt to acquire an exclusive lock on the PGLite data directory.
  * Returns { acquired: true } if the lock was obtained, { acquired: false } otherwise.
@@ -63,6 +72,7 @@ export async function acquireLock(dataDir: string | undefined, opts?: { timeoutM
 
   const timeoutMs = opts?.timeoutMs ?? 30_000; // 30 second default timeout
   const startTime = Date.now();
+  let lastLockDescription: string | null = null;
 
   while (Date.now() - startTime < timeoutMs) {
     // Check for stale lock first
@@ -71,18 +81,15 @@ export async function acquireLock(dataDir: string | undefined, opts?: { timeoutM
       try {
         const lockData = JSON.parse(readFileSync(lockPath, 'utf-8'));
         const lockPid = lockData.pid as number;
-        const lockTime = lockData.acquired_at as number;
+        lastLockDescription = describeLock(lockData);
 
         // Is the locking process still alive?
         if (!isProcessAlive(lockPid)) {
           // Stale lock — clean it up
           try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* race condition, try again */ }
-        } else if (Date.now() - lockTime > STALE_THRESHOLD_MS) {
-          // Lock held for too long — assume stale (e.g., process hung)
-          // Still alive but probably stuck — force remove
-          try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* race condition */ }
         } else {
-          // Lock is held by a live process — wait and retry
+          // Lock is held by a live process. Never force-remove a live PGLite
+          // lock: concurrent opens can crash the WASM runtime with `Aborted()`.
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
@@ -97,13 +104,15 @@ export async function acquireLock(dataDir: string | undefined, opts?: { timeoutM
       mkdirSync(lockDir, { recursive: false });
       // We got the lock — write our PID
       const lockPath = join(lockDir, LOCK_FILE);
+      const ownerToken = randomUUID();
       writeFileSync(lockPath, JSON.stringify({
         pid: process.pid,
+        owner_token: ownerToken,
         acquired_at: Date.now(),
         command: process.argv.slice(1).join(' '),
       }), { mode: 0o644 });
 
-      return { lockDir, acquired: true };
+      return { lockDir, acquired: true, ownerToken };
     } catch (e: unknown) {
       // mkdir failed — someone else grabbed it between our check and mkdir
       // This is fine, we'll retry
@@ -113,7 +122,7 @@ export async function acquireLock(dataDir: string | undefined, opts?: { timeoutM
         try {
           const lockData = JSON.parse(readFileSync(lockPath, 'utf-8'));
           throw new Error(
-            `GBrain: Timed out waiting for PGLite lock. Process ${lockData.pid} has held it since ${new Date(lockData.acquired_at).toISOString()} (command: ${lockData.command}). ` +
+            `GBrain: Timed out waiting for PGLite lock. ${describeLock(lockData)} ` +
             `If that process is dead, remove ${lockDir} and try again.`
           );
         } catch (readErr) {
@@ -128,8 +137,11 @@ export async function acquireLock(dataDir: string | undefined, opts?: { timeoutM
     }
   }
 
-  // Should not reach here, but just in case
-  throw new Error(`GBrain: Timed out waiting for PGLite lock.`);
+  throw new Error(
+    lastLockDescription
+      ? `GBrain: Timed out waiting for PGLite lock. ${lastLockDescription} If that process is dead, remove ${lockDir} and try again.`
+      : `GBrain: Timed out waiting for PGLite lock.`
+  );
 }
 
 /**
@@ -139,6 +151,11 @@ export async function releaseLock(lock: LockHandle): Promise<void> {
   if (!lock.lockDir || !lock.acquired) return;
 
   try {
+    if (lock.ownerToken) {
+      const lockPath = join(lock.lockDir, LOCK_FILE);
+      const lockData = JSON.parse(readFileSync(lockPath, 'utf-8'));
+      if (lockData.owner_token !== lock.ownerToken) return;
+    }
     rmSync(lock.lockDir, { recursive: true, force: true });
   } catch {
     // Lock file already removed (e.g., by stale cleanup) — that's fine

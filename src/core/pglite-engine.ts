@@ -2,6 +2,8 @@ import { PGlite } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite/vector';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
+import { existsSync, readFileSync, rmSync } from 'fs';
+import { join } from 'path';
 import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { runMigrations } from './migrate.ts';
@@ -23,6 +25,36 @@ import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult } f
 
 type PGLiteDB = PGlite;
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeStalePostmasterPid(dataDir: string | undefined): void {
+  if (!dataDir) return;
+
+  const pidPath = join(dataDir, 'postmaster.pid');
+  if (!existsSync(pidPath)) return;
+
+  let pid: number | null = null;
+  try {
+    const firstLine = readFileSync(pidPath, 'utf-8').split(/\r?\n/, 1)[0]?.trim();
+    pid = firstLine ? Number(firstLine) : null;
+  } catch {
+    pid = null;
+  }
+
+  if (pid && pid > 0 && isProcessAlive(pid)) {
+    throw new Error(`PGLite data directory is already in use by process ${pid}.`);
+  }
+
+  rmSync(pidPath, { force: true });
+}
+
 export class PGLiteEngine implements BrainEngine {
   private _db: PGLiteDB | null = null;
   private _lock: LockHandle | null = null;
@@ -43,20 +75,30 @@ export class PGLiteEngine implements BrainEngine {
       throw new Error('Could not acquire PGLite lock. Another gbrain process is using the database.');
     }
 
-    this._db = await PGlite.create({
-      dataDir,
-      extensions: { vector, pg_trgm },
-    });
+    try {
+      removeStalePostmasterPid(dataDir);
+      this._db = await PGlite.create({
+        dataDir,
+        extensions: { vector, pg_trgm },
+      });
+    } catch (e) {
+      await releaseLock(this._lock);
+      this._lock = null;
+      throw e;
+    }
   }
 
   async disconnect(): Promise<void> {
-    if (this._db) {
-      await this._db.close();
-      this._db = null;
-    }
-    if (this._lock?.acquired) {
-      await releaseLock(this._lock);
-      this._lock = null;
+    try {
+      if (this._db) {
+        await this._db.close();
+        this._db = null;
+      }
+    } finally {
+      if (this._lock?.acquired) {
+        await releaseLock(this._lock);
+        this._lock = null;
+      }
     }
   }
 

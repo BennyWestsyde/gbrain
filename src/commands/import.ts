@@ -1,10 +1,11 @@
 import { readdirSync, lstatSync, existsSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { join, relative } from 'path';
+import { join, relative, extname } from 'path';
 import { cpus, totalmem, homedir } from 'os';
 import type { BrainEngine } from '../core/engine.ts';
 import { importFile } from '../core/import-file.ts';
 import { loadConfig } from '../core/config.ts';
+import { BINARY_EXTENSIONS } from '../core/extract-text.ts';
 
 function defaultWorkers(): number {
   const cpuCount = cpus().length;
@@ -43,9 +44,9 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
     process.exit(1);
   }
 
-  // Collect all .md files
+  // Collect all importable files (.md, .mdx, and supported binary types)
   const allFiles = collectMarkdownFiles(dir);
-  console.log(`Found ${allFiles.length} markdown files`);
+  console.log(`Found ${allFiles.length} importable files`);
 
   // Resume from checkpoint if available
   const checkpointPath = join(homedir(), '.gbrain', 'import-checkpoint.json');
@@ -290,7 +291,7 @@ export function collectMarkdownFiles(dir: string): string[] {
 
       if (stat.isDirectory()) {
         walk(full);
-      } else if (entry.endsWith('.md') || entry.endsWith('.mdx')) {
+      } else if (!entry.startsWith('~$') && (entry.endsWith('.md') || entry.endsWith('.mdx') || BINARY_EXTENSIONS.has(extname(entry).toLowerCase()))) {
         files.push(full);
       }
     }
