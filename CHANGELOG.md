@@ -2,6 +2,90 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.22.0] - 2026-04-25
+
+**Search stops getting swamped by chat logs. Curated pages win by default.**
+
+For the last few releases, multi-word topic queries against a real brain returned chat-log pages at #1 and #2 because chat pages are 50KB and contain mentions of every topic. The actual article you wrote about the topic ranked #5. This release fixes that at the SQL layer ... ranking is now source-aware, curated directories outrank bulk content, and bookkeeping directories like `test/` and `archive/` never enter the candidate set in the first place.
+
+The fix is upstream of the existing boost stack. Chat pages no longer have to be rescued by post-RRF re-ranking ... they get dampened at retrieval. Temporal queries (`when`, `last week`, `YYYY-MM`) bypass the gate entirely so date-framed chat lookups still work. Two new env vars (`GBRAIN_SOURCE_BOOST`, `GBRAIN_SEARCH_EXCLUDE`) let you tune per-deployment. `unset` them to revert to v0.20.4 ranking exactly.
+
+Two SearchOpts additions plumb hard-exclude through the API: `exclude_slug_prefixes` (additive) and `include_slug_prefixes` (subtractive opt-back-in). The four default hard-excludes ... `test/`, `archive/`, `attachments/`, `.raw/` ... were silently polluting search results before.
+
+### The numbers that matter
+
+Headline repro: `gbrain search "fat code thin harness part 3 article"` previously returned `wintermute/chat/2026-04-15` at #1 (50KB, dense keyword density) and the actual article at originals/talks/article-outline-fat-code was buried at #5+. The new E2E test seeds an identical setup against PGLite ... article ranks #1 on both keyword and vector paths, chat pages re-surface only when `detail=high`. Engine-parity test asserts Postgres and PGLite produce the same top-5 ordering.
+
+| Surface                                | Before              | After (v0.22.0)            |
+|----------------------------------------|---------------------|----------------------------|
+| Multi-word query → curated article     | rank ~5             | **rank #1**                |
+| `test/` and `archive/` in results      | yes (silent)        | **filtered by default**    |
+| HNSW index usage in `searchVector`     | preserved           | **preserved (two-stage CTE)** |
+| Pagination contract on offset > 100    | worked              | **worked (innerLimit scales)** |
+| Temporal query workflow                | chat pages surface  | **chat pages surface**     |
+
+The two-stage CTE was the load-bearing design choice. Folding the source-boost factor into `ORDER BY cc.embedding <=> vec` would have killed the HNSW index ... seconds-per-query vs ~10ms. Inner CTE keeps a pure-distance ORDER BY for HNSW; outer SELECT re-ranks the candidate pool. Inner LIMIT scales with offset (`offset + max(limit*5, 100)`) so deep-offset pagination doesn't silently empty.
+
+### What this means for you
+
+If your brain's biggest directories are chat dumps, daily logs, or X archives, search just got dramatically better for the topic queries you actually run. If you depend on chat surfacing for date-framed questions ("what did we discuss last week"), nothing changed ... the intent classifier routes those to `detail=high` which bypasses source-boost. If you want a different boost map, set `GBRAIN_SOURCE_BOOST=originals/:1.8,wintermute/chat/:0.3` and ship.
+
+## To take advantage of v0.22.0
+
+`gbrain upgrade` should do this automatically. No DB migration is needed ... the change is purely a SQL ranking refactor on existing tables.
+
+1. **No manual migration step required.** The new ranking is on by default. Defaults are tuned for a brain with the canonical `originals/`, `concepts/`, `writing/`, `meetings/`, `daily/`, `media/x/`, `wintermute/chat/` shape.
+2. **Tune for your brain (optional):**
+   ```bash
+   # Stronger originals boost, harder chat dampening
+   export GBRAIN_SOURCE_BOOST="originals/:1.8,wintermute/chat/:0.3"
+   # Add a directory to the hard-exclude list
+   export GBRAIN_SEARCH_EXCLUDE="scratch/,private/"
+   ```
+3. **Verify the outcome:**
+   ```bash
+   gbrain search "<a multi-word topic phrase from your brain>"
+   # Expect: curated content (originals/, concepts/, writing/) at the top.
+   gbrain search "<phrase>" --detail high
+   # Expect: source-boost bypassed; chat pages allowed back.
+   ```
+4. **Rollback one-liner** if something looks off:
+   ```bash
+   unset GBRAIN_SOURCE_BOOST GBRAIN_SEARCH_EXCLUDE
+   ```
+   Reverts ranking to v0.20.4 behavior exactly. Defaults can also be overridden via env without redeploying.
+5. **If results look wrong,** file an issue at https://github.com/garrytan/gbrain/issues with:
+   - the exact query that misbehaves
+   - top-5 slugs returned
+   - what you expected to see at #1
+   - output of `gbrain doctor`
+
+### Itemized changes
+
+#### Source-aware retrieval (the headline)
+
+- New module `src/core/search/source-boost.ts` ships the default boost map (`originals/` 1.5, `concepts/` 1.3, `writing/` 1.4, `people/companies/deals/` 1.2, `daily/` 0.8, `media/x/` 0.7, `wintermute/chat/` 0.5, etc.) and the four default hard-exclude prefixes (`test/`, `archive/`, `attachments/`, `.raw/`). Both knobs override via env (`GBRAIN_SOURCE_BOOST`, `GBRAIN_SEARCH_EXCLUDE`) or per-call SearchOpts.
+- New module `src/core/search/sql-ranking.ts` is a pair of pure SQL-fragment builders shared between Postgres and PGLite engines. `buildSourceFactorCase` emits a longest-prefix-match CASE expression and returns literal `'1.0'` when `detail === 'high'` so temporal queries bypass source-boost (matches the existing COMPILED_TRUTH_BOOST gate). `buildHardExcludeClause` emits `NOT (col LIKE 'p1%' OR col LIKE 'p2%')` ... OR-chain wrapped in NOT, never `NOT LIKE ALL/ANY` (those quantifiers don't express set-exclusion). LIKE meta-character escape covers all three of `%`, `_`, AND `\` (backslash matters because it's Postgres LIKE's default escape char and a literal `\` would silently match wrong rows). Single-quote doubling renders SQL-injection-style inputs inert.
+- `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` ... both engines wire the helpers in. `searchKeyword`'s ranked_pages CTE multiplies `ts_rank * source_factor`. `searchVector` becomes a two-stage CTE: inner CTE keeps `ORDER BY cc.embedding <=> vec` for HNSW, outer SELECT re-ranks by `raw_score * source_factor`. Inner LIMIT scales with offset (`offset + max(limit*5, 100)`) to preserve pagination contract. `p.source_id` is carried through inner→outer for v0.18 multi-source callers.
+- `src/core/types.ts` ... SearchOpts gains two fields: `exclude_slug_prefixes?: string[]` (additive over defaults + env) and `include_slug_prefixes?: string[]` (subtractive opt-back-in).
+
+#### Tests
+
+- `test/sql-ranking.test.ts` ... 39 unit cases covering longest-prefix-match, detail=high temporal-bypass, three-meta-char LIKE escape (%, _, \\), single-quote SQL-literal doubling, env-var parsing (malformed entries skipped silently, factor=0 legal but inferior to hard-exclude, negative factors rejected), `resolveBoostMap` / `resolveHardExcludes` merge semantics.
+- `test/e2e/search-swamp.test.ts` ... reproduces the headline case in PGLite. Curated article competes with two chat pages stuffed with the same multi-word phrase. Asserts article wins keyword AND vector ranking, detail=high lets chat re-surface (temporal-query workflow preserved), source_id passes through two-stage CTE.
+- `test/e2e/search-exclude.test.ts` ... verifies test/ + archive/ pages hidden by default, include_slug_prefixes opts back in, exclude_slug_prefixes adds to defaults. Both keyword and vector paths.
+- `test/e2e/engine-parity.test.ts` ... Postgres ↔ PGLite top-result + result-set parity for both search methods plus a hard-exclude parity case. Codex correctly flagged that the engines have structurally different searchKeyword shapes ... without parity coverage the fix could pass on PGLite and fail on Postgres. Skips gracefully when DATABASE_URL is unset.
+
+#### Won't break what was already working
+
+The change is additive at the SQL layer; no `hybrid.ts`, `intent.ts`, `dedup.ts`, `expansion.ts`, or operations-layer changes. RRF fusion, compiled-truth boost, backlink boost, multi-query expansion, and source-aware dedup all run unchanged downstream of the new ranking. Postgres and PGLite engines kept the existing `sql.begin` + `SET LOCAL statement_timeout` v0.19 wrap so the timeout still dies with the transaction instead of leaking onto pooled connections. RLS-enabled brains still work because both inner and outer CTE SELECTs are subject to row-level policies.
+
+### For contributors
+
+- The two new helpers are pure functions with explicit params and zero engine dependencies. Both engines call them to build identical SQL. Useful pattern for any future SQL-side ranking signal that needs to land in both Postgres and PGLite.
+- The two-stage CTE pattern (HNSW-safe pure-distance inner ORDER BY, re-rank in outer SELECT) is the right shape for any future per-prefix or per-page boost in vector search. Folding extra factors into the outer ORDER BY keeps the index usable.
+- Calibration-vs-hill-climbing: defaults were grounded in the actual byte-size composition of `~/git/brain/`, not tuned against a benchmark. BrainBench Cat 13a (hand-curated source-swamp queries, sibling [gbrain-evals](https://github.com/garrytan/gbrain-evals) repo) is the calibration target ... ≥80% pass rate on Cat 13, ±2pp on Cats 1-12.
+
 ## [0.20.4] - 2026-04-24
 
 **Minions skill consolidation, now honest about what the CLI actually does.**
