@@ -29,6 +29,13 @@ export interface GBrainConfig {
   database_path?: string;
   openai_api_key?: string;
   anthropic_api_key?: string;
+  /**
+   * Optional storage backend config (S3/Supabase/local). Shape matches
+   * `StorageConfig` in `./storage.ts`. Typed as `unknown` here to avoid
+   * a cyclic import; callers pass this through `createStorage()` which
+   * validates the shape at runtime.
+   */
+  storage?: unknown;
 }
 
 /**
@@ -80,6 +87,10 @@ export function toEngineConfig(config: GBrainConfig): EngineConfig {
 }
 
 export function configDir(): string {
+  // Allow override for tests, Docker, and multi-tenant deployments.
+  // Matches the `GBRAIN_AUDIT_DIR` convention in src/core/minions/handlers/shell-audit.ts.
+  const override = process.env.GBRAIN_HOME;
+  if (override && override.trim()) return join(override, '.gbrain');
   return join(homedir(), '.gbrain');
 }
 

@@ -30,7 +30,7 @@ import { evaluateQuietHours, type QuietHoursConfig } from './quiet-hours.ts';
 function readQuietHoursConfig(job: MinionJob): QuietHoursConfig | null {
   const cfg = (job as MinionJob & { quiet_hours?: unknown }).quiet_hours;
   if (!cfg || typeof cfg !== 'object') return null;
-  return cfg as QuietHoursConfig;
+  return cfg as unknown as QuietHoursConfig;
 }
 
 /** Per-job in-flight state (isolated per job, not shared on the worker). */
@@ -125,6 +125,14 @@ export class MinionWorker {
         if (timedOut.length > 0) console.log(`Timeout detector: dead-lettered ${timedOut.length} jobs (timeout exceeded)`);
       } catch (e) {
         console.error('Timeout detection error:', e instanceof Error ? e.message : String(e));
+      }
+      try {
+        const wallClockTimedOut = await this.queue.handleWallClockTimeouts(this.opts.lockDuration);
+        if (wallClockTimedOut.length > 0) {
+          console.log(`Wall-clock detector: dead-lettered ${wallClockTimedOut.length} jobs (wall-clock timeout exceeded)`);
+        }
+      } catch (e) {
+        console.error('Wall-clock timeout detection error:', e instanceof Error ? e.message : String(e));
       }
     }, this.opts.stalledInterval);
 

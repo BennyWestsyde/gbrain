@@ -4,7 +4,7 @@ import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
 import { existsSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
-import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from './engine.ts';
+import type { BrainEngine, LinkBatchInput, TimelineBatchInput, ReservedConnection } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL } from './pglite-schema.ts';
@@ -56,6 +56,7 @@ function removeStalePostmasterPid(dataDir: string | undefined): void {
 }
 
 export class PGLiteEngine implements BrainEngine {
+  readonly kind = 'pglite' as const;
   private _db: PGLiteDB | null = null;
   private _lock: LockHandle | null = null;
 
@@ -81,10 +82,26 @@ export class PGLiteEngine implements BrainEngine {
         dataDir,
         extensions: { vector, pg_trgm },
       });
-    } catch (e) {
-      await releaseLock(this._lock);
-      this._lock = null;
-      throw e;
+    } catch (err) {
+      // v0.13.1: any PGLite.create() failure becomes actionable. Most commonly
+      // this is the macOS 26.3 WASM bug (#223). We deliberately do NOT suggest
+      // "missing migrations" as a cause — migrations run AFTER create(), so a
+      // create-time abort has nothing to do with them. Nest the original error
+      // message so debugging isn't erased.
+      const original = err instanceof Error ? err.message : String(err);
+      const wrapped = new Error(
+        `PGLite failed to initialize its WASM runtime.\n` +
+        `  This is most commonly the macOS 26.3 WASM bug: https://github.com/garrytan/gbrain/issues/223\n` +
+        `  Run \`gbrain doctor\` for a full diagnosis.\n` +
+        `  Original error: ${original}`
+      );
+      // Release the lock so a fresh process can try again; leaking the lock
+      // here turns a recoverable init error into a stuck-brain state.
+      if (this._lock?.acquired) {
+        try { await releaseLock(this._lock); } catch { /* ignore cleanup error */ }
+        this._lock = null;
+      }
+      throw wrapped;
     }
   }
 
@@ -111,6 +128,19 @@ export class PGLiteEngine implements BrainEngine {
     }
   }
 
+  async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
+    // PGLite has no connection pool. The single backing connection is
+    // always effectively reserved — pass it through.
+    const db = this.db;
+    const conn: ReservedConnection = {
+      async executeRaw<R = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<R[]> {
+        const { rows } = await db.query(sql, params);
+        return rows as R[];
+      },
+    };
+    return fn(conn);
+  }
+
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
     return this.db.transaction(async (tx) => {
       const txEngine = Object.create(this) as PGLiteEngine;
@@ -132,14 +162,21 @@ export class PGLiteEngine implements BrainEngine {
 
   async putPage(slug: string, page: PageInput): Promise<Page> {
     slug = validateSlug(slug);
-    const hash = page.content_hash || contentHash(page.compiled_truth, page.timeline || '');
+    const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
 
+    // v0.18.0 Step 2: source_id relies on the schema DEFAULT 'default' so
+    // existing callers still target the default source without threading
+    // a parameter. ON CONFLICT target becomes (source_id, slug) since the
+    // global UNIQUE(slug) was dropped in migration v17. Step 5+ will
+    // surface an explicit sourceId param on putPage for multi-source sync.
+    const pageKind = page.page_kind || 'markdown';
     const { rows } = await this.db.query(
-      `INSERT INTO pages (slug, type, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
-       ON CONFLICT (slug) DO UPDATE SET
+      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
+       ON CONFLICT (source_id, slug) DO UPDATE SET
          type = EXCLUDED.type,
+         page_kind = EXCLUDED.page_kind,
          title = EXCLUDED.title,
          compiled_truth = EXCLUDED.compiled_truth,
          timeline = EXCLUDED.timeline,
@@ -147,7 +184,7 @@ export class PGLiteEngine implements BrainEngine {
          content_hash = EXCLUDED.content_hash,
          updated_at = now()
        RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
-      [slug, page.type, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
+      [slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
   }
@@ -213,6 +250,19 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Search
+  //
+  // v0.20.0 Cathedral II Layer 3 (1b): keyword search now ranks at
+  // chunk-grain internally using content_chunks.search_vector, then dedups
+  // to best-chunk-per-page on the way out. External shape (page-grain,
+  // one row per matched page, best chunk selected) is identical to
+  // v0.19.0 — backlinks, enrichment-service.countMentions, list_pages,
+  // etc. all see the same contract. A2 two-pass (Layer 7) consumes
+  // searchKeywordChunks for raw chunk-grain results without the dedup.
+  //
+  // The DISTINCT ON pattern is translated into a two-stage query because
+  // PGLite's query planner handles CTEs-with-DISTINCT-ON less optimally
+  // than direct window function + GROUP BY. Fetch more chunks than the
+  // page limit (3x) to ensure N dedup'd pages survive; bounded and fast.
   async searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
     const limit = clampSearchLimit(opts?.limit);
     const offset = opts?.offset || 0;
@@ -222,21 +272,96 @@ export class PGLiteEngine implements BrainEngine {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
     }
 
+    // Fetch 3x to give dedup headroom, then page-dedup + re-limit.
+    const innerLimit = Math.min(limit * 3, MAX_SEARCH_LIMIT * 3);
+
+    // v0.20.0 Cathedral II Layer 10 C1/C2: language + symbol-kind filters.
+    const params: unknown[] = [query, innerLimit, limit, offset];
+    let extraFilter = '';
+    if (opts?.language) {
+      params.push(opts.language);
+      extraFilter += ` AND cc.language = $${params.length}`;
+    }
+    if (opts?.symbolKind) {
+      params.push(opts.symbolKind);
+      extraFilter += ` AND cc.symbol_type = $${params.length}`;
+    }
+
+    const { rows } = await this.db.query(
+      `WITH ranked AS (
+         SELECT
+           p.slug, p.id as page_id, p.title, p.type, p.source_id,
+           cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+           ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) AS score,
+           CASE WHEN p.updated_at < (
+             SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
+           ) THEN true ELSE false END AS stale
+         FROM content_chunks cc
+         JOIN pages p ON p.id = cc.page_id
+         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter}
+         ORDER BY score DESC
+         LIMIT $2
+       ),
+       best_per_page AS (
+         SELECT DISTINCT ON (slug) *
+         FROM ranked
+         ORDER BY slug, score DESC
+       )
+       SELECT * FROM best_per_page
+       ORDER BY score DESC
+       LIMIT $3 OFFSET $4`,
+      params
+    );
+
+    return (rows as Record<string, unknown>[]).map(rowToSearchResult);
+  }
+
+  /**
+   * v0.20.0 Cathedral II Layer 3 (1b) chunk-grain keyword search.
+   *
+   * Ranks at chunk grain via content_chunks.search_vector WITHOUT the
+   * dedup-to-page pass that searchKeyword applies on return. Used by
+   * A2 two-pass retrieval (Layer 7) as the anchor-discovery primitive:
+   * two-pass wants the top-N chunks (regardless of page), not the
+   * best chunk per top-N pages.
+   *
+   * Most callers should prefer searchKeyword (external page-grain
+   * contract). This method is intentionally a narrow internal knob.
+   */
+  async searchKeywordChunks(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
+    const limit = clampSearchLimit(opts?.limit);
+    const offset = opts?.offset || 0;
+    const detailFilter = opts?.detail === 'low' ? `AND cc.chunk_source = 'compiled_truth'` : '';
+
+    if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
+      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+    }
+
+    const params: unknown[] = [query, limit, offset];
+    let extraFilter = '';
+    if (opts?.language) {
+      params.push(opts.language);
+      extraFilter += ` AND cc.language = $${params.length}`;
+    }
+    if (opts?.symbolKind) {
+      params.push(opts.symbolKind);
+      extraFilter += ` AND cc.symbol_type = $${params.length}`;
+    }
+
     const { rows } = await this.db.query(
       `SELECT
-        p.slug, p.id as page_id, p.title, p.type,
-        cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-        ts_rank(p.search_vector, websearch_to_tsquery('english', $1)) AS score,
-        CASE WHEN p.updated_at < (
-          SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
-        ) THEN true ELSE false END AS stale
-      FROM pages p
-      JOIN content_chunks cc ON cc.page_id = p.id
-      WHERE p.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
-      ORDER BY score DESC
-      LIMIT $2
-      OFFSET $3`,
-      [query, limit, offset]
+         p.slug, p.id as page_id, p.title, p.type, p.source_id,
+         cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+         ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) AS score,
+         CASE WHEN p.updated_at < (
+           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
+         ) THEN true ELSE false END AS stale
+       FROM content_chunks cc
+       JOIN pages p ON p.id = cc.page_id
+       WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter}
+       ORDER BY score DESC
+       LIMIT $2 OFFSET $3`,
+      params
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
@@ -252,9 +377,20 @@ export class PGLiteEngine implements BrainEngine {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
     }
 
+    const params: unknown[] = [vecStr, limit, offset];
+    let extraFilter = '';
+    if (opts?.language) {
+      params.push(opts.language);
+      extraFilter += ` AND cc.language = $${params.length}`;
+    }
+    if (opts?.symbolKind) {
+      params.push(opts.symbolKind);
+      extraFilter += ` AND cc.symbol_type = $${params.length}`;
+    }
+
     const { rows } = await this.db.query(
       `SELECT
-        p.slug, p.id as page_id, p.title, p.type,
+        p.slug, p.id as page_id, p.title, p.type, p.source_id,
         cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
         1 - (cc.embedding <=> $1::vector) AS score,
         CASE WHEN p.updated_at < (
@@ -262,11 +398,11 @@ export class PGLiteEngine implements BrainEngine {
         ) THEN true ELSE false END AS stale
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
-      WHERE cc.embedding IS NOT NULL ${detailFilter}
+      WHERE cc.embedding IS NOT NULL ${detailFilter}${extraFilter}
       ORDER BY cc.embedding <=> $1::vector
       LIMIT $2
       OFFSET $3`,
-      [vecStr, limit, offset]
+      params
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
@@ -310,8 +446,14 @@ export class PGLiteEngine implements BrainEngine {
       return;
     }
 
-    // Batch upsert: build dynamic multi-row INSERT
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)';
+    // Batch upsert: build dynamic multi-row INSERT.
+    // v0.19.0: includes language/symbol_name/symbol_type/start_line/end_line
+    // so code chunks carry their tree-sitter metadata into the DB. Markdown
+    // chunks pass NULL for all five. Order must match the column list.
+    // v0.20.0 Cathedral II Layer 6: adds parent_symbol_path / doc_comment /
+    // symbol_name_qualified so nested-chunk emission (A3) and eventual A1
+    // edge resolution can round-trip metadata through upserts.
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified)';
     const rowParts: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -320,13 +462,28 @@ export class PGLiteEngine implements BrainEngine {
       const embeddingStr = chunk.embedding
         ? '[' + Array.from(chunk.embedding).join(',') + ']'
         : null;
+      const parentPath = chunk.parent_symbol_path && chunk.parent_symbol_path.length > 0
+        ? chunk.parent_symbol_path
+        : null;
 
       if (embeddingStr) {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now())`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
+        params.push(
+          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+          embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+          chunk.start_line ?? null, chunk.end_line ?? null,
+          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+        );
       } else {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL)`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
+        params.push(
+          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+          chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+          chunk.start_line ?? null, chunk.end_line ?? null,
+          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+        );
       }
     }
 
@@ -338,7 +495,15 @@ export class PGLiteEngine implements BrainEngine {
          embedding = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding ELSE COALESCE(EXCLUDED.embedding, content_chunks.embedding) END,
          model = COALESCE(EXCLUDED.model, content_chunks.model),
          token_count = EXCLUDED.token_count,
-         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at)`,
+         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at),
+         language = EXCLUDED.language,
+         symbol_name = EXCLUDED.symbol_name,
+         symbol_type = EXCLUDED.symbol_type,
+         start_line = EXCLUDED.start_line,
+         end_line = EXCLUDED.end_line,
+         parent_symbol_path = EXCLUDED.parent_symbol_path,
+         doc_comment = EXCLUDED.doc_comment,
+         symbol_name_qualified = EXCLUDED.symbol_name_qualified`,
       params
     );
   }
@@ -389,8 +554,14 @@ export class PGLiteEngine implements BrainEngine {
 
   async addLinksBatch(links: LinkBatchInput[]): Promise<number> {
     if (links.length === 0) return 0;
-    // unnest() pattern: 7 array-typed bound parameters regardless of batch size.
-    // Same shape as PostgresEngine (v0.13). Avoids the 65535-parameter cap.
+    // unnest() pattern: 10 array-typed bound parameters regardless of batch
+    // size. Same shape as PostgresEngine (v0.18). Avoids the 65535-parameter
+    // cap.
+    //
+    // v0.18.0: every JOIN composite-keys on (slug, source_id) so the batch
+    // can't fan out across sources when the same slug exists in multiple
+    // sources. Origin JOIN uses LEFT JOIN on a composite key — NULL
+    // origin_slug leaves origin_page_id NULL, same as pre-v0.18.
     const fromSlugs = links.map(l => l.from_slug);
     const toSlugs = links.map(l => l.to_slug);
     const linkTypes = links.map(l => l.link_type || '');
@@ -398,17 +569,20 @@ export class PGLiteEngine implements BrainEngine {
     const linkSources = links.map(l => l.link_source || 'markdown');
     const originSlugs = links.map(l => l.origin_slug || null);
     const originFields = links.map(l => l.origin_field || null);
+    const fromSourceIds = links.map(l => l.from_source_id || 'default');
+    const toSourceIds = links.map(l => l.to_source_id || 'default');
+    const originSourceIds = links.map(l => l.origin_source_id || 'default');
     const result = await this.db.query(
       `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
        SELECT f.id, t.id, v.link_type, v.context, v.link_source, o.id, v.origin_field
-       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
-         AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field)
-       JOIN pages f ON f.slug = v.from_slug
-       JOIN pages t ON t.slug = v.to_slug
-       LEFT JOIN pages o ON o.slug = v.origin_slug
+       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[])
+         AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field, from_source_id, to_source_id, origin_source_id)
+       JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
+       JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
+       LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
        ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO NOTHING
        RETURNING 1`,
-      [fromSlugs, toSlugs, linkTypes, contexts, linkSources, originSlugs, originFields]
+      [fromSlugs, toSlugs, linkTypes, contexts, linkSources, originSlugs, originFields, fromSourceIds, toSourceIds, originSourceIds]
     );
     return result.rows.length;
   }
@@ -674,6 +848,21 @@ export class PGLiteEngine implements BrainEngine {
     return result;
   }
 
+  async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
+    const { rows } = await this.db.query(
+      `SELECT
+         p.slug,
+         COALESCE(p.title, p.slug) AS title,
+         p.frontmatter->>'domain' AS domain
+       FROM pages p
+       WHERE NOT EXISTS (
+         SELECT 1 FROM links l WHERE l.to_page_id = p.id
+       )
+       ORDER BY p.slug`
+    );
+    return rows as Array<{ slug: string; title: string; domain: string | null }>;
+  }
+
   // Tags
   async addTag(slug: string, tag: string): Promise<void> {
     await this.db.query(
@@ -728,22 +917,21 @@ export class PGLiteEngine implements BrainEngine {
 
   async addTimelineEntriesBatch(entries: TimelineBatchInput[]): Promise<number> {
     if (entries.length === 0) return 0;
-    // unnest() pattern: 5 array-typed bound parameters regardless of batch size.
     const slugs = entries.map(e => e.slug);
     const dates = entries.map(e => e.date);
-    // Normalize optional fields to '' to match per-row addTimelineEntry + NOT NULL DDL.
     const sources = entries.map(e => e.source || '');
     const summaries = entries.map(e => e.summary);
     const details = entries.map(e => e.detail || '');
+    const sourceIds = entries.map(e => e.source_id || 'default');
     const result = await this.db.query(
       `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
        SELECT p.id, v.date::date, v.source, v.summary, v.detail
-       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-         AS v(slug, date, source, summary, detail)
-       JOIN pages p ON p.slug = v.slug
+       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+         AS v(slug, date, source, summary, detail, source_id)
+       JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
        ON CONFLICT (page_id, date, summary) DO NOTHING
        RETURNING 1`,
-      [slugs, dates, sources, summaries, details]
+      [slugs, dates, sources, summaries, details, sourceIds]
     );
     return result.rows.length;
   }
@@ -1035,4 +1223,184 @@ export class PGLiteEngine implements BrainEngine {
     const { rows } = await this.db.query(sql, params);
     return rows as T[];
   }
+
+  // ============================================================
+  // v0.20.0 Cathedral II: code edges (Layer 1 stubs — filled by Layer 5)
+  // ============================================================
+  // Declared here so the interface contract is satisfied and consumers can
+  // import against them. Implementations throw until the edge extractor +
+  // per-lang tree-sitter queries land in Layer 5/6.
+  // ============================================================
+
+  async addCodeEdges(edges: import('./types.ts').CodeEdgeInput[]): Promise<number> {
+    if (edges.length === 0) return 0;
+    let inserted = 0;
+    // Split into resolved vs unresolved. Resolved rows carry to_chunk_id
+    // (known target chunk); unresolved rows only know the qualified name.
+    const resolved = edges.filter(e => e.to_chunk_id != null);
+    const unresolved = edges.filter(e => e.to_chunk_id == null);
+
+    if (resolved.length > 0) {
+      const rowParts: string[] = [];
+      const params: unknown[] = [];
+      let p = 1;
+      for (const e of resolved) {
+        rowParts.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}::jsonb, $${p++})`);
+        params.push(
+          e.from_chunk_id, e.to_chunk_id, e.from_symbol_qualified,
+          e.to_symbol_qualified, e.edge_type,
+          JSON.stringify(e.edge_metadata ?? {}),
+          e.source_id ?? null,
+        );
+      }
+      const res = await this.db.query(
+        `INSERT INTO code_edges_chunk
+           (from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified, edge_type, edge_metadata, source_id)
+         VALUES ${rowParts.join(', ')}
+         ON CONFLICT (from_chunk_id, to_chunk_id, edge_type) DO NOTHING`,
+        params,
+      );
+      inserted += res.affectedRows ?? 0;
+    }
+    if (unresolved.length > 0) {
+      const rowParts: string[] = [];
+      const params: unknown[] = [];
+      let p = 1;
+      for (const e of unresolved) {
+        rowParts.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}::jsonb, $${p++})`);
+        params.push(
+          e.from_chunk_id, e.from_symbol_qualified, e.to_symbol_qualified, e.edge_type,
+          JSON.stringify(e.edge_metadata ?? {}),
+          e.source_id ?? null,
+        );
+      }
+      const res = await this.db.query(
+        `INSERT INTO code_edges_symbol
+           (from_chunk_id, from_symbol_qualified, to_symbol_qualified, edge_type, edge_metadata, source_id)
+         VALUES ${rowParts.join(', ')}
+         ON CONFLICT (from_chunk_id, to_symbol_qualified, edge_type) DO NOTHING`,
+        params,
+      );
+      inserted += res.affectedRows ?? 0;
+    }
+    return inserted;
+  }
+
+  async deleteCodeEdgesForChunks(chunkIds: number[]): Promise<void> {
+    if (chunkIds.length === 0) return;
+    // Both directions on code_edges_chunk; from-only on code_edges_symbol
+    // (unresolved edges don't have a to_chunk_id to match against).
+    await this.db.query(
+      `DELETE FROM code_edges_chunk WHERE from_chunk_id = ANY($1::int[]) OR to_chunk_id = ANY($1::int[])`,
+      [chunkIds],
+    );
+    await this.db.query(
+      `DELETE FROM code_edges_symbol WHERE from_chunk_id = ANY($1::int[])`,
+      [chunkIds],
+    );
+  }
+
+  async getCallersOf(
+    qualifiedName: string,
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+    const limit = Math.min(opts?.limit ?? 100, 500);
+    const sourceClause = opts?.allSources || !opts?.sourceId
+      ? ''
+      : `AND source_id = '${opts.sourceId.replace(/'/g, "''")}'`;
+    const { rows } = await this.db.query(
+      `SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, true as resolved
+         FROM code_edges_chunk
+         WHERE to_symbol_qualified = $1 ${sourceClause}
+       UNION ALL
+       SELECT id, from_chunk_id, NULL as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, false as resolved
+         FROM code_edges_symbol
+         WHERE to_symbol_qualified = $1 ${sourceClause}
+       LIMIT $2`,
+      [qualifiedName, limit],
+    );
+    return (rows as Record<string, unknown>[]).map(rowToCodeEdge);
+  }
+
+  async getCalleesOf(
+    qualifiedName: string,
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+    const limit = Math.min(opts?.limit ?? 100, 500);
+    const sourceClause = opts?.allSources || !opts?.sourceId
+      ? ''
+      : `AND source_id = '${opts.sourceId.replace(/'/g, "''")}'`;
+    const { rows } = await this.db.query(
+      `SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, true as resolved
+         FROM code_edges_chunk
+         WHERE from_symbol_qualified = $1 ${sourceClause}
+       UNION ALL
+       SELECT id, from_chunk_id, NULL as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, false as resolved
+         FROM code_edges_symbol
+         WHERE from_symbol_qualified = $1 ${sourceClause}
+       LIMIT $2`,
+      [qualifiedName, limit],
+    );
+    return (rows as Record<string, unknown>[]).map(rowToCodeEdge);
+  }
+
+  async getEdgesByChunk(
+    chunkId: number,
+    opts?: { direction?: 'in' | 'out' | 'both'; edgeType?: string; limit?: number },
+  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+    const direction = opts?.direction ?? 'both';
+    const limit = Math.min(opts?.limit ?? 50, 200);
+    const edgeTypeClause = opts?.edgeType ? `AND edge_type = '${opts.edgeType.replace(/'/g, "''")}'` : '';
+    // Build the chunk-table filter based on direction. Unresolved edges
+    // (code_edges_symbol) only carry from_chunk_id — there's no inbound
+    // direction into them from a chunk ID, so we include them only when
+    // direction is 'out' or 'both'.
+    let chunkFilter = '';
+    if (direction === 'in') chunkFilter = `WHERE to_chunk_id = $1`;
+    else if (direction === 'out') chunkFilter = `WHERE from_chunk_id = $1`;
+    else chunkFilter = `WHERE from_chunk_id = $1 OR to_chunk_id = $1`;
+
+    let symbolFilter = '';
+    if (direction === 'out' || direction === 'both') {
+      symbolFilter = `WHERE from_chunk_id = $1`;
+    }
+
+    const unionClause = symbolFilter ? `
+      UNION ALL
+      SELECT id, from_chunk_id, NULL as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+             edge_type, edge_metadata, source_id, false as resolved
+        FROM code_edges_symbol
+        ${symbolFilter} ${edgeTypeClause}
+    ` : '';
+
+    const { rows } = await this.db.query(
+      `SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
+              edge_type, edge_metadata, source_id, true as resolved
+         FROM code_edges_chunk
+         ${chunkFilter} ${edgeTypeClause}
+       ${unionClause}
+       LIMIT $2`,
+      [chunkId, limit],
+    );
+    return (rows as Record<string, unknown>[]).map(rowToCodeEdge);
+  }
+
+}
+
+function rowToCodeEdge(row: Record<string, unknown>): import('./types.ts').CodeEdgeResult {
+  return {
+    id: row.id as number,
+    from_chunk_id: row.from_chunk_id as number,
+    to_chunk_id: row.to_chunk_id == null ? null : (row.to_chunk_id as number),
+    from_symbol_qualified: (row.from_symbol_qualified as string) ?? '',
+    to_symbol_qualified: (row.to_symbol_qualified as string) ?? '',
+    edge_type: (row.edge_type as string) ?? '',
+    edge_metadata: (row.edge_metadata as Record<string, unknown>) ?? {},
+    source_id: row.source_id == null ? null : (row.source_id as string),
+    resolved: Boolean(row.resolved),
+  };
 }

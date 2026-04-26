@@ -24,7 +24,8 @@ export type ErrorCode =
   | 'embedding_failed'
   | 'storage_error'
   | 'bucket_not_found'
-  | 'database_error';
+  | 'database_error'
+  | 'permission_denied';
 
 export class OperationError extends Error {
   constructor(
@@ -167,6 +168,26 @@ export interface OperationContext {
    * When unset, operations MUST default to the stricter (remote=true) behavior.
    */
   remote?: boolean;
+  /**
+   * Subagent runtime context (v0.16+). Set by the subagent tool dispatcher when
+   * dispatching an op as a tool call from an LLM loop. Used to enforce per-op
+   * agent policy (e.g. put_page namespace rule).
+   *
+   * `viaSubagent` is the FAIL-CLOSED flag: when true, agent-facing policy MUST
+   * be enforced even if `subagentId` happens to be undefined (a bug in the
+   * dispatcher must not bypass the guard). `subagentId` is the owning subagent
+   * job id; `jobId` is the current Minion job id (aggregator or subagent).
+   */
+  jobId?: number;
+  subagentId?: number;
+  viaSubagent?: boolean;
+  /**
+   * Resolved global CLI options (--quiet / --progress-json / --progress-interval).
+   * CLI callers populate this from `getCliOptions()`. MCP / library callers
+   * may leave it undefined — consumers default to quiet/no-progress for
+   * background work.
+   */
+  cliOpts?: { quiet: boolean; progressJson: boolean; progressInterval: number };
 }
 
 export interface Operation {
@@ -228,8 +249,28 @@ const put_page: Operation = {
   },
   mutating: true,
   handler: async (ctx, p) => {
-    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
     const slug = p.slug as string;
+
+    // Subagent namespace enforcement (v0.15+). Runs BEFORE the dry-run
+    // short-circuit so preview calls surface the same rejection. Confines
+    // LLM-driven writes to wiki/agents/<subagentId>/... — no leading slash
+    // (slug grammar rejects that), anchored, slash-boundary to defeat prefix
+    // collisions like `wiki/agents/12evil/*` impersonating subagent 12.
+    //
+    // FAIL-CLOSED: `viaSubagent=true` enforces the check even if the
+    // dispatcher forgot to populate `subagentId`. Agent-originated writes
+    // without an owning subagent id are rejected outright.
+    if (ctx.viaSubagent === true) {
+      if (typeof ctx.subagentId !== 'number' || Number.isNaN(ctx.subagentId)) {
+        throw new OperationError('permission_denied', 'put_page via subagent requires ctx.subagentId');
+      }
+      const prefix = `wiki/agents/${ctx.subagentId}/`;
+      if (!slug.startsWith(prefix) || slug.length === prefix.length) {
+        throw new OperationError('permission_denied', `put_page via subagent must write under '${prefix}...'`);
+      }
+    }
+
+    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
     // Skip embedding when no OpenAI key is configured. importFromContent's existing
     // try/catch around embed only catches; without a key the OpenAI client would
     // attempt 5 retries with exponential backoff (up to ~2 minutes total) before
@@ -540,6 +581,12 @@ const query: Operation = {
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     expand: { type: 'boolean', description: 'Enable multi-query expansion (default: true)' },
     detail: { type: 'string', description: 'Result detail level: low (compiled truth only), medium (default, all with dedup), high (all chunks)' },
+    // v0.20.0 Cathedral II Layer 10 C1/C2: language + symbol-kind filters.
+    lang: { type: 'string', description: 'Filter to chunks where content_chunks.language matches (e.g., typescript, python, ruby)' },
+    symbol_kind: { type: 'string', description: 'Filter to chunks where content_chunks.symbol_type matches (e.g., function, class, method, type, interface)' },
+    // v0.20.0 Cathedral II Layer 7 (A2) / Layer 10 C3: two-pass structural expansion.
+    near_symbol: { type: 'string', description: 'Anchor retrieval at this qualified symbol name (e.g., BrainEngine.searchKeyword). Enables A2 two-pass.' },
+    walk_depth: { type: 'number', description: 'Structural walk depth 1-2. Default 0 (off). Expands anchors through code_edges with 1/(1+hop) decay.' },
   },
   handler: async (ctx, p) => {
     const expand = p.expand !== false;
@@ -550,6 +597,10 @@ const query: Operation = {
       expansion: expand,
       expandFn: expand ? expandQuery : undefined,
       detail,
+      language: (p.lang as string) || undefined,
+      symbolKind: (p.symbol_kind as string) || undefined,
+      nearSymbol: (p.near_symbol as string) || undefined,
+      walkDepth: typeof p.walk_depth === 'number' ? (p.walk_depth as number) : undefined,
     });
   },
   cliHints: { name: 'query', positional: ['query'] },
@@ -668,7 +719,7 @@ const get_backlinks: Operation = {
  * grows a `visited` array per path; in `direction=both` the join is `OR`-based and
  * fans out exponentially. Without a cap, a remote MCP caller can pass depth=1e6
  * and burn memory/CPU on the database. 10 hops is well beyond any realistic
- * relationship query (Wintermute's "people who attended meetings with Alice"
+ * relationship query (your OpenClaw's "people who attended meetings with Alice"
  * is 2 hops; the deepest meaningful chain in our test data is 4).
  */
 const TRAVERSE_DEPTH_CAP = 10;
@@ -1249,9 +1300,9 @@ const find_orphans: Operation = {
       description: 'Include auto-generated and pseudo pages (default: false)',
     },
   },
-  handler: async (_ctx, p) => {
+  handler: async (ctx, p) => {
     const { findOrphans } = await import('../commands/orphans.ts');
-    return findOrphans((p.include_pseudo as boolean) || false);
+    return findOrphans(ctx.engine, { includePseudo: (p.include_pseudo as boolean) || false });
   },
   cliHints: { name: 'orphans', hidden: true },
 };

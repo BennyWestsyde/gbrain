@@ -22,6 +22,12 @@ tools:
   - add_timeline_entry
   - file_upload
 mutating: true
+writes_pages: true
+writes_to:
+  - concepts/
+  - people/
+  - companies/
+  - sources/
 ---
 
 # Media Ingest Skill
@@ -39,7 +45,7 @@ This skill guarantees:
 - Raw source files preserved via `gbrain files upload-raw`
 - Filing by primary subject, not by media format
 
-## Iron Law: Back-Linking (MANDATORY)
+> **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
 
 Every mention of a person or company with a brain page MUST create a back-link.
 

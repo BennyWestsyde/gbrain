@@ -50,8 +50,8 @@ async function extractPdf(filePath: string, title: string): Promise<string> {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
     const pageText = content.items
-      .filter((item): item is { str: string } => 'str' in item)
-      .map(item => item.str)
+      .map((item) => 'str' in item ? item.str : '')
+      .filter(Boolean)
       .join(' ')
       .trim();
     if (pageText) pages.push(pageText);
@@ -73,7 +73,7 @@ async function extractDocx(filePath: string, title: string): Promise<string> {
 async function extractPptx(filePath: string, title: string): Promise<string> {
   const AdmZip = (await import('adm-zip')).default;
   const zip = new AdmZip(filePath);
-  const entries = zip.getEntries();
+  const entries: Array<{ entryName: string; getData(): Buffer }> = zip.getEntries();
 
   // Extract text from slide XML files in order
   const slideEntries = entries

@@ -13,6 +13,54 @@ let connectedUrl: string | null = null;
  */
 const DEFAULT_POOL_SIZE_FALLBACK = 10;
 
+/**
+ * Supabase PgBouncer transaction-mode convention: port 6543 routes through
+ * PgBouncer, which recycles the backend connection between queries and
+ * invalidates per-client prepared-statement caches. On that port postgres.js
+ * defaults (prepare=true) surface as `prepared statement "..." does not exist`
+ * under sustained load and silently drop rows during sync.
+ *
+ * This is a heuristic, not a protocol guarantee. A direct-Postgres server
+ * deliberately bound to 6543 will also get `prepare: false`; the
+ * `GBRAIN_PREPARE=true` env var (or `?prepare=true` on the URL) is the
+ * documented escape hatch.
+ */
+const AUTO_DETECT_PORTS = new Set(['6543']);
+
+/**
+ * Decide whether to force `prepare: true`/`false` on the postgres.js client.
+ *
+ * Precedence:
+ *   1. `GBRAIN_PREPARE` env var (`true`/`1` or `false`/`0`)
+ *   2. `?prepare=true|false` query param on the URL
+ *   3. Auto-detect: port 6543 → `false`
+ *   4. Default: `undefined` (caller omits the option; postgres.js default stands)
+ *
+ * Returns `boolean | undefined`. `undefined` is meaningful — callers MUST
+ * omit the `prepare` key entirely in that case rather than passing
+ * `undefined` through to `postgres(url, {prepare: undefined})`.
+ */
+export function resolvePrepare(url: string): boolean | undefined {
+  const envPrepare = process.env.GBRAIN_PREPARE;
+  if (envPrepare === 'false' || envPrepare === '0') return false;
+  if (envPrepare === 'true' || envPrepare === '1') return true;
+
+  try {
+    const parsed = new URL(url.replace(/^postgres(ql)?:\/\//, 'http://'));
+    const urlPrepare = parsed.searchParams.get('prepare');
+    if (urlPrepare === 'false') return false;
+    if (urlPrepare === 'true') return true;
+
+    if (AUTO_DETECT_PORTS.has(parsed.port)) {
+      return false;
+    }
+  } catch {
+    // URL parse failure — fall through to default
+  }
+
+  return undefined;
+}
+
 export function resolvePoolSize(explicit?: number): number {
   if (typeof explicit === 'number' && explicit > 0) return explicit;
   const raw = process.env.GBRAIN_POOL_SIZE;
@@ -21,6 +69,29 @@ export function resolvePoolSize(explicit?: number): number {
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
   return DEFAULT_POOL_SIZE_FALLBACK;
+}
+
+/**
+ * Apply session-level defaults to a fresh connection. Called from both
+ * the module-level `connect()` singleton and the PostgresEngine
+ * instance-level pool so the idle-in-transaction session timeout is set
+ * uniformly.
+ *
+ * `idle_in_transaction_session_timeout = 5 min` was the v0.18.0 field
+ * report's headline production issue: a 24-hour idle connection was
+ * holding a lock on `pages` and blocking all DDL. 5 minutes is generous
+ * for any legitimate transaction but catches crashed writers. The GUC
+ * is session-scoped (safe for shared pools — no cross-statement leak).
+ *
+ * Wrapped in try/catch because some managed Postgres tenants restrict
+ * SET on the GUC; non-fatal if it fails.
+ */
+export async function setSessionDefaults(sql: ReturnType<typeof postgres>): Promise<void> {
+  try {
+    await sql`SET idle_in_transaction_session_timeout = '300000'`;
+  } catch {
+    // Non-fatal: some managed Postgres may restrict this GUC
+  }
 }
 
 export function getConnection(): ReturnType<typeof postgres> {
@@ -53,7 +124,8 @@ export async function connect(config: EngineConfig): Promise<void> {
   }
 
   try {
-    sql = postgres(url, {
+    const prepare = resolvePrepare(url);
+    const opts: Record<string, unknown> = {
       max: resolvePoolSize(),
       idle_timeout: 20,
       connect_timeout: 10,
@@ -61,11 +133,22 @@ export async function connect(config: EngineConfig): Promise<void> {
         // Register pgvector type
         bigint: postgres.BigInt,
       },
-    });
+    };
+    if (typeof prepare === 'boolean') {
+      opts.prepare = prepare;
+      if (!prepare) {
+        console.warn(
+          '[gbrain] Prepared statements disabled (PgBouncer transaction-mode convention on port 6543). Override with GBRAIN_PREPARE=true if your pooler runs in session mode.',
+        );
+      }
+    }
+    sql = postgres(url, opts);
 
     // Test connection
     await sql`SELECT 1`;
     connectedUrl = url;
+
+    await setSessionDefaults(sql);
   } catch (e: unknown) {
     sql = null;
     connectedUrl = null;
@@ -101,5 +184,5 @@ export async function withTransaction<T>(fn: (tx: ReturnType<typeof postgres>) =
   const conn = getConnection();
   return conn.begin(async (tx) => {
     return fn(tx as unknown as ReturnType<typeof postgres>);
-  });
+  }) as Promise<T>;
 }
