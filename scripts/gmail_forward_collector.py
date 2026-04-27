@@ -461,9 +461,16 @@ def message_page_relative_path(record: dict) -> Path:
     return Path("email") / "messages" / date / f"{msg_id}.md"
 
 
+def timeline_summary(record: dict) -> str:
+    subject = md_inline(record.get("subject") or "(no subject)")
+    sender = md_inline(record.get("from") or "unknown sender")
+    return f"Gmail — Received email \"{subject}\" from {sender}"
+
+
 def message_page_content(record: dict) -> str:
     subject = record.get("subject") or "(no subject)"
     date = record.get("date") or ""
+    timeline_date = str(date)[:10] or datetime.now(timezone.utc).date().isoformat()
     bucket = record.get("bucket") or "triage"
     tags = ["email", "gmail", "forwarded-mail", "message", f"email-{slug_part(bucket)}"]
     attachments = record.get("attachments") or []
@@ -498,6 +505,12 @@ def message_page_content(record: dict) -> str:
         lines.append(f"- Labels: {', '.join(labels)}")
     if attachments:
         lines.append(f"- Attachments: {', '.join(attachments)}")
+    lines.extend([
+        "",
+        "## Timeline",
+        "",
+        f"- **{timeline_date}** | {timeline_summary(record)}",
+    ])
     lines.extend(["", "## Body", "", body, ""])
     return truncate_utf8("\n".join(lines))
 
@@ -575,11 +588,24 @@ def import_message_pages(args: argparse.Namespace) -> int:
         "returncode": result.returncode,
     }
     if result.returncode == 0:
-        append_heartbeat(root, "import_messages", "ok", details=details)
+        timeline_result = subprocess.run(
+            [str(gbrain), "extract", "timeline", "--source", "db", "--type", "source"],
+            text=True,
+            capture_output=True,
+            cwd=str(Path.cwd()),
+        )
+        details["timeline_returncode"] = timeline_result.returncode
+        status = "ok" if timeline_result.returncode == 0 else "warn"
+        error = timeline_result.stderr.strip() if timeline_result.returncode != 0 else None
+        append_heartbeat(root, "import_messages", status, details=details, error=error)
         if result.stdout.strip():
             print(result.stdout.strip())
+        if timeline_result.stdout.strip():
+            print(timeline_result.stdout.strip())
+        if timeline_result.stderr.strip():
+            print(timeline_result.stderr.strip())
         print(json.dumps(details, indent=2, sort_keys=True))
-        return 0
+        return timeline_result.returncode
 
     append_heartbeat(root, "import_messages", "error", details=details, error=result.stderr.strip())
     if result.stdout.strip():
