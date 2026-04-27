@@ -562,7 +562,7 @@ def import_message_pages(args: argparse.Namespace) -> int:
 
     gbrain = Path(args.gbrain).expanduser()
     result = subprocess.run(
-        [str(gbrain), "import", str(page_root)],
+        [str(gbrain), "import", str(page_root), "--no-embed"],
         text=True,
         capture_output=True,
         cwd=str(Path.cwd()),
