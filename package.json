@@ -29,9 +29,10 @@
   "scripts": {
     "dev": "bun run src/cli.ts",
     "build": "bun build --compile --outfile bin/gbrain src/cli.ts",
-    "build:local": "bun run build && mkdir -p \"$HOME/.bun/bin\" && ln -sf \"$PWD/bin/gbrain\" \"$HOME/.bun/bin/gbrain\" && \"$HOME/.bun/bin/gbrain\" --version",
+    "build:local": "bun run build && scripts/smoke-compiled-pglite.sh bin/gbrain && mkdir -p \"$HOME/.bun/bin\" && ln -sf \"$PWD/bin/gbrain\" \"$HOME/.bun/bin/gbrain\" && \"$HOME/.bun/bin/gbrain\" --version",
     "build:all": "bun build --compile --target=bun-darwin-arm64 --outfile bin/gbrain-darwin-arm64 src/cli.ts && bun build --compile --target=bun-linux-x64 --outfile bin/gbrain-linux-x64 src/cli.ts",
-    "build:all:local": "bun run build:all && mkdir -p \"$HOME/.bun/bin\" && case \"$(uname -s)-$(uname -m)\" in Darwin-arm64) local_bin=bin/gbrain-darwin-arm64 ;; Linux-x86_64) local_bin=bin/gbrain-linux-x64 ;; *) echo \"Unsupported local platform: $(uname -s)-$(uname -m)\" >&2; exit 1 ;; esac && ln -sf \"$PWD/$local_bin\" \"$HOME/.bun/bin/gbrain\" && \"$HOME/.bun/bin/gbrain\" --version",
+    "build:all:local": "bun run build:all && mkdir -p \"$HOME/.bun/bin\" && case \"$(uname -s)-$(uname -m)\" in Darwin-arm64) local_bin=bin/gbrain-darwin-arm64 ;; Linux-x86_64) local_bin=bin/gbrain-linux-x64 ;; *) echo \"Unsupported local platform: $(uname -s)-$(uname -m)\" >&2; exit 1 ;; esac && scripts/smoke-compiled-pglite.sh \"$local_bin\" && ln -sf \"$PWD/$local_bin\" \"$HOME/.bun/bin/gbrain\" && \"$HOME/.bun/bin/gbrain\" --version",
+    "smoke:compiled:pglite": "scripts/smoke-compiled-pglite.sh bin/gbrain",
     "build:schema": "bash scripts/build-schema.sh",
     "build:llms": "bun run scripts/build-llms.ts",
     "test": "scripts/check-jsonb-pattern.sh && scripts/check-progress-to-stdout.sh && scripts/check-wasm-embedded.sh && bun run typecheck && bun test --timeout=60000",

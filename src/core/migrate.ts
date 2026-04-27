@@ -639,7 +639,7 @@ export const MIGRATIONS: Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_pages_source_id ON pages(source_id);
 
-        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_slug_key;
+        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_slug_key CASCADE;
         DO $$ BEGIN
           IF NOT EXISTS (
             SELECT 1 FROM pg_constraint WHERE conname = 'pages_source_slug_key'

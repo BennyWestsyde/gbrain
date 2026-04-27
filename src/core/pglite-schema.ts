@@ -63,7 +63,18 @@ CREATE TABLE IF NOT EXISTS pages (
 CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type);
 CREATE INDEX IF NOT EXISTS idx_pages_frontmatter ON pages USING GIN(frontmatter);
 CREATE INDEX IF NOT EXISTS idx_pages_trgm ON pages USING GIN(title gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_pages_source_id ON pages(source_id);
+-- Guard: source_id is added by migration v21. On fresh installs the column
+-- exists (CREATE TABLE above created it). On upgrades from pre-v0.18.0,
+-- the column does not exist yet — skip so the plain CREATE TABLE IF NOT EXISTS
+-- no-op does not cause an index failure before v21 runs.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'pages' AND column_name = 'source_id'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_pages_source_id ON pages(source_id)';
+  END IF;
+END $$;
 
 -- ============================================================
 -- content_chunks: chunked content with embeddings
@@ -91,8 +102,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_i
 CREATE INDEX IF NOT EXISTS idx_chunks_page ON content_chunks(page_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON content_chunks USING hnsw (embedding vector_cosine_ops);
 -- v0.19.0: partial indexes for code chunk lookups.
-CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON content_chunks(symbol_name) WHERE symbol_name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_chunks_language ON content_chunks(language) WHERE language IS NOT NULL;
+-- Guard: symbol_name / language are added by migration v26. Skip on upgrades
+-- from pre-v0.19.0 so the no-op CREATE TABLE IF NOT EXISTS doesn't trigger
+-- index creation against non-existent columns before v26 runs.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'content_chunks' AND column_name = 'symbol_name'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON content_chunks(symbol_name) WHERE symbol_name IS NOT NULL';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'content_chunks' AND column_name = 'language'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_chunks_language ON content_chunks(language) WHERE language IS NOT NULL';
+  END IF;
+END $$;
 
 -- ============================================================
 -- links: cross-references between pages
@@ -211,8 +237,22 @@ CREATE TABLE IF NOT EXISTS files (
 ALTER TABLE files DROP COLUMN IF EXISTS storage_url;
 
 CREATE INDEX IF NOT EXISTS idx_files_page ON files(page_slug);
-CREATE INDEX IF NOT EXISTS idx_files_page_id ON files(page_id);
-CREATE INDEX IF NOT EXISTS idx_files_source_id ON files(source_id);
+-- Guard: page_id and source_id were added to files in v0.18.0. Skip index
+-- creation on upgrades from older schemas where these columns don't exist yet.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'files' AND column_name = 'page_id'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_files_page_id ON files(page_id)';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'files' AND column_name = 'source_id'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_files_source_id ON files(source_id)';
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 
 -- ============================================================

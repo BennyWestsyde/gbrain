@@ -1,9 +1,9 @@
 import { PGlite } from '@electric-sql/pglite';
-import { vector } from '@electric-sql/pglite/vector';
-import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
-import { existsSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 import type { BrainEngine, LinkBatchInput, TimelineBatchInput, ReservedConnection } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { runMigrations } from './migrate.ts';
@@ -23,7 +23,70 @@ import type {
 } from './types.ts';
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult } from './utils.ts';
 
+// Embed PGLite's runtime assets explicitly for `bun build --compile`.
+// PGLite's default loader resolves these as sibling files of its package JS;
+// in a compiled Bun binary that path can become /$bunfs/root/... without the
+// data file present unless GBrain imports the assets directly.
+// @ts-ignore - Bun file imports are not part of TypeScript's standard lib.
+import PGLITE_DATA from '../../node_modules/@electric-sql/pglite/dist/pglite.data' with { type: 'file' };
+// @ts-ignore
+import PGLITE_WASM from '../../node_modules/@electric-sql/pglite/dist/pglite.wasm' with { type: 'file' };
+// @ts-ignore
+import INITDB_WASM from '../../node_modules/@electric-sql/pglite/dist/initdb.wasm' with { type: 'file' };
+// @ts-ignore
+import VECTOR_BUNDLE from '../../node_modules/@electric-sql/pglite/dist/vector.tar.gz' with { type: 'file' };
+// @ts-ignore
+import PG_TRGM_BUNDLE from '../../node_modules/@electric-sql/pglite/dist/pg_trgm.tar.gz' with { type: 'file' };
+
 type PGLiteDB = PGlite;
+
+const materializedAssets = new Map<string, string>();
+
+function materializeAsset(assetPath: string, name: string): string {
+  const cached = materializedAssets.get(name);
+  if (cached) return cached;
+
+  const dir = join(tmpdir(), 'gbrain-pglite-assets');
+  mkdirSync(dir, { recursive: true });
+  const outPath = join(dir, name);
+  writeFileSync(outPath, readFileSync(assetPath));
+  materializedAssets.set(name, outPath);
+  return outPath;
+}
+
+const vector = {
+  name: 'pgvector',
+  async setup(_pg: unknown, emscriptenOpts: unknown) {
+    return {
+      emscriptenOpts,
+      bundlePath: pathToFileURL(materializeAsset(VECTOR_BUNDLE, 'vector.tar.gz')),
+    };
+  },
+};
+
+const pg_trgm = {
+  name: 'pg_trgm',
+  async setup() {
+    return {
+      bundlePath: pathToFileURL(materializeAsset(PG_TRGM_BUNDLE, 'pg_trgm.tar.gz')),
+    };
+  },
+};
+
+let pgliteWasmModule: WebAssembly.Module | null = null;
+let initdbWasmModule: WebAssembly.Module | null = null;
+let fsBundle: Blob | null = null;
+
+function getPGLiteAssets(): {
+  pgliteWasmModule: WebAssembly.Module;
+  initdbWasmModule: WebAssembly.Module;
+  fsBundle: Blob;
+} {
+  pgliteWasmModule ??= new WebAssembly.Module(readFileSync(PGLITE_WASM));
+  initdbWasmModule ??= new WebAssembly.Module(readFileSync(INITDB_WASM));
+  fsBundle ??= new Blob([readFileSync(PGLITE_DATA)]);
+  return { pgliteWasmModule, initdbWasmModule, fsBundle };
+}
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -80,6 +143,7 @@ export class PGLiteEngine implements BrainEngine {
       removeStalePostmasterPid(dataDir);
       this._db = await PGlite.create({
         dataDir,
+        ...getPGLiteAssets(),
         extensions: { vector, pg_trgm },
       });
     } catch (err) {

@@ -20,7 +20,11 @@ export type DbUrlSource =
   | null;
 
 // Lazy-evaluated to avoid calling homedir() at module scope (breaks in serverless/bundled environments)
-function getConfigDir() { return join(homedir(), '.gbrain'); }
+function getConfigDir() {
+  const override = process.env.GBRAIN_HOME;
+  if (override && override.trim()) return join(override, '.gbrain');
+  return join(homedir(), '.gbrain');
+}
 function getConfigPath() { return join(getConfigDir(), 'config.json'); }
 
 export interface GBrainConfig {
