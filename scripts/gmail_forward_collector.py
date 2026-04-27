@@ -392,8 +392,9 @@ def truncate_utf8(text: str, max_bytes: int = MAX_PAGE_BYTES) -> str:
 def format_record(record: dict) -> str:
     attachments = record.get("attachments") or []
     attach = f" Attachments: {', '.join(attachments)}." if attachments else ""
+    message_slug = str(message_page_relative_path(record).with_suffix(""))
     return (
-        f"- **{md_inline(record.get('subject'))}** — {md_inline(record.get('from'))} — {record.get('date')}. "
+        f"- **[{md_inline(record.get('subject'))}]({message_slug})** — {md_inline(record.get('from'))} — {record.get('date')}. "
         f"[Open in Gmail]({record.get('gmail_url')})\n"
         f"  {md_inline(record.get('snippet'))}{attach}"
     ).rstrip()
