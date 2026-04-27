@@ -5,7 +5,7 @@ import { runMigrations } from './migrate.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
-  Chunk, ChunkInput,
+  Chunk, ChunkInput, StaleChunkRow,
   SearchResult, SearchOpts,
   Link, GraphNode, GraphPath,
   TimelineEntry, TimelineInput, TimelineOpts,
@@ -18,10 +18,26 @@ import type {
 import { GBrainError } from './types.ts';
 import * as db from './db.ts';
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding } from './utils.ts';
+import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
+import { buildSourceFactorCase, buildHardExcludeClause } from './search/sql-ranking.ts';
+
+// CONNECTION_ERROR_PATTERNS / isConnectionError were used by the per-call
+// executeRaw retry that #406 originally shipped. Eng-review D3 dropped that
+// retry as unsound (regex idempotence-boundary doesn't hold for writable
+// CTEs or side-effecting SELECTs). Recovery now happens at the supervisor
+// level (3-strikes-then-reconnect). The unit tests in
+// test/connection-resilience.test.ts retain a self-contained copy of the
+// helper so the regression-against-future-reintroduction guard still works.
+// See TODOS.md item: "err.code-based connection-error matching" for the
+// follow-up that will reintroduce a typed retry mechanism.
 
 export class PostgresEngine implements BrainEngine {
   readonly kind = 'postgres' as const;
   private _sql: ReturnType<typeof postgres> | null = null;
+  /** Saved config for reconnection. */
+  private _savedConfig: (EngineConfig & { poolSize?: number }) | null = null;
+  /** Whether a reconnect is in progress (prevents concurrent reconnects). */
+  private _reconnecting = false;
 
   // Instance connection (for workers) or fall back to module global (backward compat)
   get sql(): ReturnType<typeof postgres> {
@@ -31,6 +47,7 @@ export class PostgresEngine implements BrainEngine {
 
   // Lifecycle
   async connect(config: EngineConfig & { poolSize?: number }): Promise<void> {
+    this._savedConfig = config;
     if (config.poolSize) {
       // Instance-level connection for worker isolation. resolvePoolSize lets
       // GBRAIN_POOL_SIZE cap below the caller's requested size when set — the
@@ -43,12 +60,20 @@ export class PostgresEngine implements BrainEngine {
       // "prepared statement does not exist" under load just like the module
       // singleton did before v0.15.4.
       const prepare = db.resolvePrepare(url);
+      // Session timeouts (statement_timeout + idle_in_transaction_session_timeout)
+      // keep orphan pgbouncer backends from holding locks for hours when the
+      // postgres.js client disconnects mid-transaction. See resolveSessionTimeouts
+      // in db.ts for context + env var overrides.
+      const timeouts = db.resolveSessionTimeouts();
       const opts: Record<string, unknown> = {
         max: size,
         idle_timeout: 20,
         connect_timeout: 10,
         types: { bigint: postgres.BigInt },
       };
+      if (Object.keys(timeouts).length > 0) {
+        opts.connection = timeouts;
+      }
       if (typeof prepare === 'boolean') {
         opts.prepare = prepare;
       }
@@ -236,51 +261,83 @@ export class PostgresEngine implements BrainEngine {
     // ship < limit pages. 3x gives dedup enough to pick top N distinct pages.
     const innerLimit = Math.min(limit * 3, MAX_SEARCH_LIMIT * 3);
 
-    // Search-only timeout: prevents DoS via expensive queries without
-    // affecting long-running operations like embed --all or bulk import.
-    // SET LOCAL inside sql.begin() scopes the GUC to the transaction so
-    // it can never leak onto a pooled connection returned to other
-    // callers. A bare `SET statement_timeout` goes to an arbitrary
-    // connection from the pool, lives past this method, and either
-    // clips an unrelated caller's long-running query (DoS) or — via
-    // `SET statement_timeout = 0` — disables the guard for them.
+    // Source-aware ranking (v0.22): boost curated content (originals/,
+    // concepts/, writing/) and dampen bulk content (chat/, daily/, media/x/)
+    // by multiplying the chunk-grain ts_rank with a source-factor CASE.
+    // Detail-gated — disabled for `detail='high'` (temporal queries) so
+    // chat surfaces normally for date-framed lookups. Hard-exclude prefixes
+    // (test/, archive/, attachments/, .raw/ by default) filter at the
+    // chunk-rank stage so they never enter the candidate set.
+    const boostMap = resolveBoostMap();
+    const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
+    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
+    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+
+    const params: unknown[] = [query];
+    let typeClause = '';
+    if (type) {
+      params.push(type);
+      typeClause = `AND p.type = $${params.length}`;
+    }
+    let excludeSlugsClause = '';
+    if (excludeSlugs?.length) {
+      params.push(excludeSlugs);
+      excludeSlugsClause = `AND p.slug != ALL($${params.length}::text[])`;
+    }
+    let languageClause = '';
+    if (language) {
+      params.push(language);
+      languageClause = `AND cc.language = $${params.length}`;
+    }
+    let symbolKindClause = '';
+    if (symbolKind) {
+      params.push(symbolKind);
+      symbolKindClause = `AND cc.symbol_type = $${params.length}`;
+    }
+    params.push(innerLimit);
+    const innerLimitParam = `$${params.length}`;
+    params.push(limit);
+    const limitParam = `$${params.length}`;
+    params.push(offset);
+    const offsetParam = `$${params.length}`;
+
+    const rawQuery = `
+      WITH ranked_chunks AS (
+        SELECT
+          p.slug, p.id as page_id, p.title, p.type, p.source_id,
+          cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+          ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score
+        FROM content_chunks cc
+        JOIN pages p ON p.id = cc.page_id
+        WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
+          ${typeClause}
+          ${excludeSlugsClause}
+          ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
+          ${languageClause}
+          ${symbolKindClause}
+          ${hardExcludeClause}
+        ORDER BY score DESC
+        LIMIT ${innerLimitParam}
+      ),
+      best_per_page AS (
+        SELECT DISTINCT ON (slug) *
+        FROM ranked_chunks
+        ORDER BY slug, score DESC
+      )
+      SELECT slug, page_id, title, type, source_id,
+        chunk_id, chunk_index, chunk_text, chunk_source, score,
+        false AS stale
+      FROM best_per_page
+      ORDER BY score DESC
+      LIMIT ${limitParam}
+      OFFSET ${offsetParam}
+    `;
+
+    // Search-only timeout. SET LOCAL inside sql.begin() scopes the GUC
+    // to the transaction so it can never leak onto a pooled connection.
     const rows = await sql.begin(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
-      // CTE chain: rank chunks by FTS → DISTINCT ON (slug) to pick best
-      // chunk per page → order by score → limit. The external shape is
-      // page-grain; chunk-grain ranking wins because A4 weights mean
-      // doc-comment hits (and, once Layer 5 populates them, qualified
-      // symbol hits) beat body-text hits at the chunk level.
-      return await sql`
-        WITH ranked_chunks AS (
-          SELECT
-            p.slug, p.id as page_id, p.title, p.type, p.source_id,
-            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-            ts_rank(cc.search_vector, websearch_to_tsquery('english', ${query})) AS score
-          FROM content_chunks cc
-          JOIN pages p ON p.id = cc.page_id
-          WHERE cc.search_vector @@ websearch_to_tsquery('english', ${query})
-            ${type ? sql`AND p.type = ${type}` : sql``}
-            ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
-            ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
-            ${language ? sql`AND cc.language = ${language}` : sql``}
-            ${symbolKind ? sql`AND cc.symbol_type = ${symbolKind}` : sql``}
-          ORDER BY score DESC
-          LIMIT ${innerLimit}
-        ),
-        best_per_page AS (
-          SELECT DISTINCT ON (slug) *
-          FROM ranked_chunks
-          ORDER BY slug, score DESC
-        )
-        SELECT slug, page_id, title, type, source_id,
-          chunk_id, chunk_index, chunk_text, chunk_source, score,
-          false AS stale
-        FROM best_per_page
-        ORDER BY score DESC
-        LIMIT ${limit}
-        OFFSET ${offset}
-      `;
+      return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
     return rows.map(rowToSearchResult);
   }
@@ -308,26 +365,64 @@ export class PostgresEngine implements BrainEngine {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
     }
 
+    // Source-aware ranking applies here too — searchKeywordChunks is the
+    // chunk-grain anchor primitive that two-pass retrieval (Layer 7) uses,
+    // so curated-vs-bulk dampening should affect the anchor pool. Same
+    // detail-gate, same hard-exclude behavior as searchKeyword.
+    const boostMap = resolveBoostMap();
+    const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
+    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
+    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+
+    const params: unknown[] = [query];
+    let typeClause = '';
+    if (type) {
+      params.push(type);
+      typeClause = `AND p.type = $${params.length}`;
+    }
+    let excludeSlugsClause = '';
+    if (excludeSlugs?.length) {
+      params.push(excludeSlugs);
+      excludeSlugsClause = `AND p.slug != ALL($${params.length}::text[])`;
+    }
+    let languageClause = '';
+    if (language) {
+      params.push(language);
+      languageClause = `AND cc.language = $${params.length}`;
+    }
+    let symbolKindClause = '';
+    if (symbolKind) {
+      params.push(symbolKind);
+      symbolKindClause = `AND cc.symbol_type = $${params.length}`;
+    }
+    params.push(limit);
+    const limitParam = `$${params.length}`;
+    params.push(offset);
+    const offsetParam = `$${params.length}`;
+
+    const rawQuery = `
+      SELECT
+        p.slug, p.id as page_id, p.title, p.type, p.source_id,
+        cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+        ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score,
+        false AS stale
+      FROM content_chunks cc
+      JOIN pages p ON p.id = cc.page_id
+      WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
+        ${typeClause}
+        ${excludeSlugsClause}
+        ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
+        ${languageClause}
+        ${symbolKindClause}
+        ${hardExcludeClause}
+      ORDER BY score DESC
+      LIMIT ${limitParam}
+      OFFSET ${offsetParam}
+    `;
+
     const rows = await sql.begin(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
-      return await sql`
-        SELECT
-          p.slug, p.id as page_id, p.title, p.type, p.source_id,
-          cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-          ts_rank(cc.search_vector, websearch_to_tsquery('english', ${query})) AS score,
-          false AS stale
-        FROM content_chunks cc
-        JOIN pages p ON p.id = cc.page_id
-        WHERE cc.search_vector @@ websearch_to_tsquery('english', ${query})
-          ${type ? sql`AND p.type = ${type}` : sql``}
-          ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
-          ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
-          ${language ? sql`AND cc.language = ${language}` : sql``}
-          ${symbolKind ? sql`AND cc.symbol_type = ${symbolKind}` : sql``}
-        ORDER BY score DESC
-        LIMIT ${limit}
-        OFFSET ${offset}
-      `;
+      return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
     return rows.map(rowToSearchResult);
   }
@@ -348,29 +443,80 @@ export class PostgresEngine implements BrainEngine {
 
     const vecStr = '[' + Array.from(embedding).join(',') + ']';
 
-    // Search-only timeout (see searchKeyword for rationale). SET LOCAL +
-    // sql.begin ensures the GUC stays transaction-scoped on the pooled
-    // connection.
-    const rows = await sql.begin(async sql => {
-      await sql`SET LOCAL statement_timeout = '8s'`;
-      return await sql`
+    // Two-stage CTE (v0.22): inner CTE keeps a pure-distance ORDER BY so
+    // the HNSW index stays usable. Folding source-boost into the inner
+    // ORDER BY would force a sequential scan over every chunk (seconds vs
+    // ~10ms with HNSW). Outer SELECT re-ranks the candidate pool by
+    // raw_score * source_factor.
+    //
+    // innerLimit scales with offset to preserve the pagination contract:
+    // a fixed cap of 100 would silently empty offset > 100.
+    const boostMap = resolveBoostMap();
+    const sourceFactorCaseOnSlug = buildSourceFactorCase('slug', boostMap, opts?.detail);
+    const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
+    const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
+    const innerLimit = offset + Math.max(limit * 5, 100);
+
+    const params: unknown[] = [vecStr];
+    let typeClause = '';
+    if (type) {
+      params.push(type);
+      typeClause = `AND p.type = $${params.length}`;
+    }
+    let excludeSlugsClause = '';
+    if (excludeSlugs?.length) {
+      params.push(excludeSlugs);
+      excludeSlugsClause = `AND p.slug != ALL($${params.length}::text[])`;
+    }
+    let languageClause = '';
+    if (language) {
+      params.push(language);
+      languageClause = `AND cc.language = $${params.length}`;
+    }
+    let symbolKindClause = '';
+    if (symbolKind) {
+      params.push(symbolKind);
+      symbolKindClause = `AND cc.symbol_type = $${params.length}`;
+    }
+    params.push(innerLimit);
+    const innerLimitParam = `$${params.length}`;
+    params.push(limit);
+    const limitParam = `$${params.length}`;
+    params.push(offset);
+    const offsetParam = `$${params.length}`;
+
+    const rawQuery = `
+      WITH hnsw_candidates AS (
         SELECT
           p.slug, p.id as page_id, p.title, p.type, p.source_id,
           cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-          1 - (cc.embedding <=> ${vecStr}::vector) AS score,
-          false AS stale
+          1 - (cc.embedding <=> $1::vector) AS raw_score
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         WHERE cc.embedding IS NOT NULL
-          ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
-          ${type ? sql`AND p.type = ${type}` : sql``}
-          ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
-          ${language ? sql`AND cc.language = ${language}` : sql``}
-          ${symbolKind ? sql`AND cc.symbol_type = ${symbolKind}` : sql``}
-        ORDER BY cc.embedding <=> ${vecStr}::vector
-        LIMIT ${limit}
-        OFFSET ${offset}
-      `;
+          ${detailLow ? `AND cc.chunk_source = 'compiled_truth'` : ''}
+          ${typeClause}
+          ${excludeSlugsClause}
+          ${languageClause}
+          ${symbolKindClause}
+          ${hardExcludeClause}
+        ORDER BY cc.embedding <=> $1::vector
+        LIMIT ${innerLimitParam}
+      )
+      SELECT
+        slug, page_id, title, type, source_id,
+        chunk_id, chunk_index, chunk_text, chunk_source,
+        raw_score * ${sourceFactorCaseOnSlug} AS score,
+        false AS stale
+      FROM hnsw_candidates
+      ORDER BY score DESC
+      LIMIT ${limitParam}
+      OFFSET ${offsetParam}
+    `;
+
+    const rows = await sql.begin(async sql => {
+      await sql`SET LOCAL statement_timeout = '8s'`;
+      return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
     return rows.map(rowToSearchResult);
   }
@@ -449,7 +595,13 @@ export class PostgresEngine implements BrainEngine {
       }
     }
 
-    // Single statement upsert: preserves existing embeddings via COALESCE when new value is NULL
+    // Single statement upsert: preserves existing embeddings via COALESCE when new value is NULL.
+    // CONSISTENCY: when chunk_text changes and no new embedding is supplied, BOTH embedding AND
+    // embedded_at must reset to NULL so `embed --stale` correctly picks up the row for re-embedding.
+    // Without this, embedded_at lies (says "embedded" while embedding=NULL), and any staleness
+    // predicate on embedded_at would silently skip the row. This is why the egress fix predicates
+    // on `embedding IS NULL` rather than `embedded_at IS NULL` — and it's why we now keep both
+    // columns honest at write time.
     await sql.unsafe(
       `INSERT INTO content_chunks ${cols} VALUES ${rows.join(', ')}
        ON CONFLICT (page_id, chunk_index) DO UPDATE SET
@@ -458,7 +610,10 @@ export class PostgresEngine implements BrainEngine {
          embedding = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding ELSE COALESCE(EXCLUDED.embedding, content_chunks.embedding) END,
          model = COALESCE(EXCLUDED.model, content_chunks.model),
          token_count = EXCLUDED.token_count,
-         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at),
+         embedded_at = CASE
+           WHEN EXCLUDED.chunk_text != content_chunks.chunk_text AND EXCLUDED.embedding IS NULL THEN NULL
+           ELSE COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at)
+         END,
          language = EXCLUDED.language,
          symbol_name = EXCLUDED.symbol_name,
          symbol_type = EXCLUDED.symbol_type,
@@ -480,6 +635,30 @@ export class PostgresEngine implements BrainEngine {
       ORDER BY cc.chunk_index
     `;
     return rows.map((r) => rowToChunk(r as Record<string, unknown>));
+  }
+
+  async countStaleChunks(): Promise<number> {
+    const sql = this.sql;
+    const [row] = await sql`
+      SELECT count(*)::int AS count
+      FROM content_chunks
+      WHERE embedding IS NULL
+    `;
+    return Number((row as { count?: number } | undefined)?.count ?? 0);
+  }
+
+  async listStaleChunks(): Promise<StaleChunkRow[]> {
+    const sql = this.sql;
+    const rows = await sql`
+      SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
+             cc.model, cc.token_count
+      FROM content_chunks cc
+      JOIN pages p ON p.id = cc.page_id
+      WHERE cc.embedding IS NULL
+      ORDER BY p.id, cc.chunk_index
+      LIMIT 100000
+    `;
+    return rows as unknown as StaleChunkRow[];
   }
 
   async deleteChunks(slug: string): Promise<void> {
@@ -1205,9 +1384,34 @@ export class PostgresEngine implements BrainEngine {
     return rows.map((r) => rowToChunk(r as Record<string, unknown>, true));
   }
 
+  /**
+   * Reconnect the engine by tearing down the current pool and creating a fresh one.
+   * No-ops if no saved config (module-singleton mode) or if already reconnecting.
+   */
+  async reconnect(): Promise<void> {
+    if (!this._savedConfig || this._reconnecting) return;
+    this._reconnecting = true;
+    try {
+      // Tear down old pool (best-effort — it may already be dead)
+      try { await this.disconnect(); } catch { /* swallow */ }
+      // Create fresh pool
+      await this.connect(this._savedConfig);
+    } finally {
+      this._reconnecting = false;
+    }
+  }
+
   async executeRaw<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
     const conn = this.sql;
     return conn.unsafe(sql, params as Parameters<typeof conn.unsafe>[1]) as unknown as T[];
+    // Pre-#406 behavior: throw on any error including connection death.
+    // Per-call auto-retry is not safe here because executeRaw is also used
+    // for non-transactional mutations (DELETE/UPDATE/INSERT in sources.ts,
+    // ALTER TABLE in migrations) where retrying after a connection-mid-statement
+    // death can phantom-write a row that already committed on the server.
+    // Recovery instead happens at the supervisor level: the watchdog detects
+    // 3 consecutive health-check failures and calls engine.reconnect() to
+    // swap in a fresh pool. See db.ts setSessionDefaults / supervisor.ts.
   }
 
   // ============================================================
