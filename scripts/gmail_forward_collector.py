@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from email.utils import parseaddr
 import html
 import json
 import os
@@ -369,6 +370,17 @@ def slug_part(value: str) -> str:
     return value or "message"
 
 
+def sender_domain(sender: str) -> str:
+    _, address = parseaddr(sender or "")
+    if "@" not in address:
+        return ""
+    return address.rsplit("@", 1)[1].lower().strip()
+
+
+def tag_part(value: object) -> str:
+    return slug_part(str(value or ""))
+
+
 def truncate_utf8(text: str, max_bytes: int = MAX_PAGE_BYTES) -> str:
     data = text.encode("utf-8")
     if len(data) <= max_bytes:
@@ -461,13 +473,17 @@ def message_page_relative_path(record: dict) -> Path:
     return Path("email") / "messages" / date / f"{msg_id}.md"
 
 
+def digest_slug_for_date(date: str) -> str:
+    return f"email/digests/{date}"
+
+
 def timeline_summary(record: dict) -> str:
     subject = md_inline(record.get("subject") or "(no subject)")
     sender = md_inline(record.get("from") or "unknown sender")
     return f"Gmail — Received email \"{subject}\" from {sender}"
 
 
-def message_page_content(record: dict) -> str:
+def message_page_content(record: dict, digest_date: str) -> str:
     subject = record.get("subject") or "(no subject)"
     date = record.get("date") or ""
     timeline_date = str(date)[:10] or datetime.now(timezone.utc).date().isoformat()
@@ -475,6 +491,14 @@ def message_page_content(record: dict) -> str:
     tags = ["email", "gmail", "forwarded-mail", "message", f"email-{slug_part(bucket)}"]
     attachments = record.get("attachments") or []
     labels = record.get("labels") or []
+    domain = sender_domain(record.get("from") or "")
+    if domain:
+        tags.append(f"email-domain-{tag_part(domain)}")
+    if attachments:
+        tags.append("email-has-attachments")
+    tags.extend(f"gmail-label-{tag_part(label)}" for label in labels if label)
+    tags = sorted(dict.fromkeys(tags))
+    digest_slug = digest_slug_for_date(digest_date)
     body = record.get("body_text") or record.get("snippet") or ""
     body = body.strip() or "_No text body extracted._"
 
@@ -499,6 +523,7 @@ def message_page_content(record: dict) -> str:
         f"- Cc: {record.get('cc') or ''}",
         f"- Date: {date}",
         f"- Gmail: [Open message]({record.get('gmail_url') or ''})",
+        f"- Digest: [Email-to-Brain Digest {digest_date}]({digest_slug})",
         f"- Bucket: {bucket}",
     ]
     if labels:
@@ -562,12 +587,13 @@ def import_message_pages(args: argparse.Namespace) -> int:
         records = sorted(records, key=lambda r: r.get("date", ""), reverse=True)[:message_limit]
 
     page_root = root / "data" / "page-import"
+    digest_date = args.date or datetime.now(timezone.utc).date().isoformat()
     written = 0
     for record in records:
         rel = message_page_relative_path(record)
         path = page_root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        content = message_page_content(record)
+        content = message_page_content(record, digest_date)
         if path.exists() and path.read_text(encoding="utf-8") == content:
             continue
         path.write_text(content, encoding="utf-8")
@@ -588,24 +614,36 @@ def import_message_pages(args: argparse.Namespace) -> int:
         "returncode": result.returncode,
     }
     if result.returncode == 0:
+        links_result = subprocess.run(
+            [str(gbrain), "extract", "links", "--source", "db", "--type", "source"],
+            text=True,
+            capture_output=True,
+            cwd=str(Path.cwd()),
+        )
         timeline_result = subprocess.run(
             [str(gbrain), "extract", "timeline", "--source", "db", "--type", "source"],
             text=True,
             capture_output=True,
             cwd=str(Path.cwd()),
         )
+        details["links_returncode"] = links_result.returncode
         details["timeline_returncode"] = timeline_result.returncode
-        status = "ok" if timeline_result.returncode == 0 else "warn"
-        error = timeline_result.stderr.strip() if timeline_result.returncode != 0 else None
+        status = "ok" if links_result.returncode == 0 and timeline_result.returncode == 0 else "warn"
+        errors = [r.stderr.strip() for r in (links_result, timeline_result) if r.returncode != 0 and r.stderr.strip()]
+        error = "\n".join(errors) if errors else None
         append_heartbeat(root, "import_messages", status, details=details, error=error)
         if result.stdout.strip():
             print(result.stdout.strip())
+        if links_result.stdout.strip():
+            print(links_result.stdout.strip())
+        if links_result.stderr.strip():
+            print(links_result.stderr.strip())
         if timeline_result.stdout.strip():
             print(timeline_result.stdout.strip())
         if timeline_result.stderr.strip():
             print(timeline_result.stderr.strip())
         print(json.dumps(details, indent=2, sort_keys=True))
-        return timeline_result.returncode
+        return links_result.returncode or timeline_result.returncode
 
     append_heartbeat(root, "import_messages", "error", details=details, error=result.stderr.strip())
     if result.stdout.strip():

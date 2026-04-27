@@ -71,6 +71,16 @@ describe('extractEntityRefs', () => {
     expect(refs.length).toBe(1);
     expect(refs[0].dir).toBe('meetings');
   });
+
+  test('extracts email integration refs', () => {
+    const refs = extractEntityRefs('Digest: [Email-to-Brain Digest 2026-04-27](email/digests/2026-04-27).');
+    expect(refs.length).toBe(1);
+    expect(refs[0]).toEqual({
+      name: 'Email-to-Brain Digest 2026-04-27',
+      slug: 'email/digests/2026-04-27',
+      dir: 'email',
+    });
+  });
 });
 // ─── extractPageLinks ──────────────────────────────────────────
 

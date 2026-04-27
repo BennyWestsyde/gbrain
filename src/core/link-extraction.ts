@@ -42,9 +42,10 @@ export type LinkResolutionType = 'qualified' | 'unqualified';
  * recognizes as entity references. Upstream canonical + our extensions:
  *   - Gbrain canonical: people, companies, meetings, concepts, deal, civic, project, source, media, yc, projects
  *   - Our domain extensions: tech, finance, personal, openclaw (domain-organized wikis)
+ *   - Integration sources: email
  *   - Our entity prefix: entities (we kept some legacy entities/projects/ pages)
  */
-const DIR_PATTERN = '(?:people|companies|meetings|concepts|deal|civic|project|projects|source|media|yc|tech|finance|personal|openclaw|entities)';
+const DIR_PATTERN = '(?:people|companies|meetings|concepts|deal|civic|project|projects|source|media|yc|tech|finance|personal|openclaw|email|entities)';
 
 /**
  * Match `[Name](path)` markdown links pointing to entity directories.
