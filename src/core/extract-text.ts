@@ -9,7 +9,7 @@ import { extname, basename } from 'path';
 export type SupportedBinaryExt = '.pdf' | '.docx' | '.pptx' | '.xlsx' | '.doc' | '.rtf';
 
 export const BINARY_EXTENSIONS: Set<string> = new Set([
-  '.pdf', '.docx', '.pptx', '.xlsx', '.doc', '.rtf',
+  '.pdf', '.docx', '.pptx', '.xlsx', '.doc', '.rtf', '.srt', '.vtt',
 ]);
 
 export function isSupportedBinary(filePath: string): boolean {
@@ -36,6 +36,9 @@ export async function extractText(filePath: string): Promise<string> {
       return extractXlsx(filePath, title);
     case '.rtf':
       return extractRtf(filePath, title);
+    case '.srt':
+    case '.vtt':
+      return extractSubtitles(filePath, title);
     default:
       throw new Error(`Unsupported file type: ${ext}`);
   }
@@ -131,6 +134,42 @@ function extractRtf(filePath: string, title: string): string {
     .replace(/ {2,}/g, ' ')                 // collapse spaces
     .trim();
   if (!text) throw new Error('RTF contains no extractable text');
+  return `# ${title}\n\n${text}`;
+}
+
+/**
+ * Extract subtitle text from SRT or WebVTT files.
+ *
+ * Both formats interleave timing metadata with the actual subtitle
+ * strings. We keep only the strings — the timings are useful only for
+ * playback, and embedding search over a bag of "00:12:34,120 -->"
+ * timestamps would poison the vector for the underlying content.
+ *
+ * The two formats differ enough at the header/cue boundary that we
+ * strip both patterns rather than switch on extension: SRT cues open
+ * with a numeric sequence line, WebVTT with an optional `WEBVTT`
+ * header and no sequence numbers. Ignoring both means the same code
+ * path handles either.
+ */
+function extractSubtitles(filePath: string, title: string): string {
+  const content = readFileSync(filePath, 'utf-8');
+  const lines: string[] = [];
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    // WebVTT header
+    if (line === 'WEBVTT' || line.startsWith('WEBVTT ')) continue;
+    // Cue timing line (SRT: `00:00:12,300 --> ...`; VTT: `00:00:12.300 --> ...`)
+    if (/-->/.test(line)) continue;
+    // Bare SRT sequence number (a line consisting only of digits)
+    if (/^\d+$/.test(line)) continue;
+    // WebVTT cue metadata (NOTE / STYLE / cue identifiers with `align:`)
+    if (line.startsWith('NOTE') || line.startsWith('STYLE')) continue;
+    // Strip inline HTML-ish tags (VTT allows <b>, <i>, <c.name>, ...)
+    lines.push(line.replace(/<[^>]+>/g, '').trim());
+  }
+  const text = lines.filter(Boolean).join('\n').trim();
+  if (!text) throw new Error('Subtitle file contains no extractable text');
   return `# ${title}\n\n${text}`;
 }
 
