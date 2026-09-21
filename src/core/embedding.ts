@@ -2,7 +2,12 @@
  * Embedding Service
  * Ported from production Ruby implementation (embedding_service.rb, 190 LOC)
  *
- * OpenAI text-embedding-3-large at 1536 dimensions.
+ * Default: OpenAI text-embedding-3-large at 1536 dimensions.
+ * Fork override: set `embedding_model` + `embedding_dimensions` in
+ * ~/.gbrain/config.json to route to any OpenAI-compatible embeddings
+ * endpoint (e.g. local nomic via LM Studio). See
+ * platform/memory/UPSTREAM_SYNC.md.
+ *
  * Retry with exponential backoff (4s base, 120s cap, 5 retries).
  * 8000 character input truncation.
  */
@@ -10,8 +15,19 @@
 import OpenAI from 'openai';
 import { loadConfig } from './config.ts';
 
-const MODEL = 'text-embedding-3-large';
-const DIMENSIONS = 1536;
+const DEFAULT_MODEL = 'text-embedding-3-large';
+const DEFAULT_DIMENSIONS = 1536;
+// Evaluated once at module load. Config is stable per-process; a swap
+// requires restarting whichever CLI/daemon is running.
+const _cfgModel = loadConfig()?.embedding_model;
+const _cfgDim = loadConfig()?.embedding_dimensions;
+const MODEL = _cfgModel ?? DEFAULT_MODEL;
+const DIMENSIONS = _cfgDim ?? DEFAULT_DIMENSIONS;
+// `dimensions` is OpenAI's matryoshka-truncation parameter, honoured by
+// text-embedding-3-*. Local/OSS backends (nomic via LM Studio, bge-m3,
+// etc.) either reject it or return malformed vectors. Only send it when
+// we're on the upstream default.
+const SEND_DIMENSIONS = _cfgModel === undefined;
 const MAX_CHARS = 8000;
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 4000;
@@ -64,11 +80,20 @@ export async function embedBatch(
 async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const response = await getClient().embeddings.create({
-        model: MODEL,
-        input: texts,
-        dimensions: DIMENSIONS,
-      });
+      const request: {
+        model: string;
+        input: string[];
+        dimensions?: number;
+        encoding_format?: 'float' | 'base64';
+      } = { model: MODEL, input: texts };
+      if (SEND_DIMENSIONS) request.dimensions = DIMENSIONS;
+      // Force `float` for local/OSS backends. The OpenAI SDK defaults to
+      // base64 (bandwidth win against OpenAI's servers), but LM Studio /
+      // nomic return raw floats regardless — the SDK's base64 decoder
+      // then produces garbage. Only override when using a non-default
+      // model so upstream OpenAI behavior stays byte-identical.
+      if (_cfgModel !== undefined) request.encoding_format = 'float';
+      const response = await getClient().embeddings.create(request);
 
       // Sort by index to maintain order
       const sorted = response.data.sort((a, b) => a.index - b.index);

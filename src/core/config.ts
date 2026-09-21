@@ -40,6 +40,13 @@ export interface GBrainConfig {
    * validates the shape at runtime.
    */
   storage?: unknown;
+  /**
+   * Fork-only: override the embedding model / dimension used by
+   * `src/core/embedding.ts`. Defaults preserve upstream behavior
+   * (text-embedding-3-large @ 1536). See platform/memory/UPSTREAM_SYNC.md.
+   */
+  embedding_model?: string;
+  embedding_dimensions?: number;
 }
 
 /**
