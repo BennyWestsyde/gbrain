@@ -1,5 +1,5 @@
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
-import { extractText, isDocumentFilePath } from './extract-text.ts';
+import { extractText, isDocumentFilePath, NoExtractableTextError } from './extract-text.ts';
 import { assertImportBase, sameCanonicalImport } from './page-state/import-guard.ts';
 import { stabilizeSafetyAssessments } from './persistence/reconcile-safety.ts';
 import { readSourceFileSync } from './minions/source-filesystem.ts';
@@ -146,7 +146,7 @@ export interface ImportResult {
    * in its malformed summary and keeps them OUT of failedFiles / the failure
    * ledger so they can never gate bookmark advancement.
    */
-  skip_reason?: 'malformed_path';
+  skip_reason?: 'malformed_path' | 'no_extractable_text';
   /**
    * Advisory (schema.type_warnings): the page's explicit frontmatter `type:`
    * is an alias of a canonical pack type or undeclared in the pack. The type
@@ -1179,6 +1179,10 @@ export async function importFromFile(
       extracted = await extractText(filePath);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (e instanceof NoExtractableTextError) {
+        // Informational (like malformed_path): never gates sync's bookmark.
+        return { slug, status: 'skipped', skip_reason: 'no_extractable_text', chunks: 0, error: msg };
+      }
       return { slug, status: 'skipped', chunks: 0, error: `Text extraction failed: ${msg}` };
     }
     return importFromContent(engine, slug, extracted, opts);

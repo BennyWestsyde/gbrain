@@ -13,6 +13,18 @@ export const BINARY_EXTENSIONS: Set<string> = new Set([
   '.pdf', '.docx', '.pptx', '.xlsx', '.doc', '.rtf', '.srt', '.vtt',
 ]);
 
+/**
+ * Fork: the document has no text layer (scanned PDF, empty doc). Import treats
+ * this as an informational skip, not a failure, so one image-only handout
+ * can't block a sync.
+ */
+export class NoExtractableTextError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NoExtractableTextError';
+  }
+}
+
 export function isSupportedBinary(filePath: string): boolean {
   return BINARY_EXTENSIONS.has(extname(filePath).toLowerCase());
 }
@@ -81,7 +93,7 @@ async function extractPdf(filePath: string, title: string): Promise<string> {
     if (pageText) pages.push(pageText);
   }
   const text = pages.join('\n\n').trim();
-  if (!text) throw new Error('PDF contains no extractable text (may be scanned image)');
+  if (!text) throw new NoExtractableTextError('PDF contains no extractable text (may be scanned image)');
   return `# ${title}\n\n${text}`;
 }
 
@@ -90,7 +102,7 @@ async function extractDocx(filePath: string, title: string): Promise<string> {
   const buffer = readFileSync(filePath);
   const result = await mammoth.extractRawText({ buffer });
   const text = result.value.trim();
-  if (!text) throw new Error('DOCX contains no extractable text');
+  if (!text) throw new NoExtractableTextError('DOCX contains no extractable text');
   return `# ${title}\n\n${text}`;
 }
 
@@ -120,7 +132,7 @@ async function extractPptx(filePath: string, title: string): Promise<string> {
     }
   }
 
-  if (slideTexts.length === 0) throw new Error('PPTX contains no extractable text');
+  if (slideTexts.length === 0) throw new NoExtractableTextError('PPTX contains no extractable text');
   return `# ${title}\n\n${slideTexts.join('\n\n')}`;
 }
 
@@ -140,7 +152,7 @@ async function extractXlsx(filePath: string, title: string): Promise<string> {
     }
   }
 
-  if (sharedStrings.length === 0) throw new Error('XLSX contains no extractable text');
+  if (sharedStrings.length === 0) throw new NoExtractableTextError('XLSX contains no extractable text');
   return `# ${title}\n\n${sharedStrings.join('\n')}`;
 }
 
@@ -154,7 +166,7 @@ function extractRtf(filePath: string, title: string): string {
     .replace(/[{}\\]/g, '')                 // remaining braces/backslashes
     .replace(/ {2,}/g, ' ')                 // collapse spaces
     .trim();
-  if (!text) throw new Error('RTF contains no extractable text');
+  if (!text) throw new NoExtractableTextError('RTF contains no extractable text');
   return `# ${title}\n\n${text}`;
 }
 
@@ -190,7 +202,7 @@ function extractSubtitles(filePath: string, title: string): string {
     lines.push(line.replace(/<[^>]+>/g, '').trim());
   }
   const text = lines.filter(Boolean).join('\n').trim();
-  if (!text) throw new Error('Subtitle file contains no extractable text');
+  if (!text) throw new NoExtractableTextError('Subtitle file contains no extractable text');
   return `# ${title}\n\n${text}`;
 }
 

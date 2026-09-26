@@ -2976,6 +2976,9 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
             // Informational skip — a bracket/control-char filename can never
             // import; counting it as a failure would gate the bookmark forever.
             serr(`  Skipped (malformed filename): ${sanitizePathForDisplay(to)}`);
+          } else if (result.status === 'skipped' && result.skip_reason === 'no_extractable_text') {
+            // Fork: image-only document (e.g. scanned PDF). Informational.
+            serr(`  Skipped (no extractable text — scanned or empty document): ${sanitizePathForDisplay(to)}`);
           } else if (result.status === 'skipped' && (result as { error?: string }).error) {
             // An errored skip (frontmatter slug-authority rejection, invalid
             // YAML, symlink refusal, oversize file, ...) means the
@@ -3416,6 +3419,11 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           // failure, and stable across runs — checkpoint it as done so a
           // resumed sync doesn't re-attempt it forever.
           serr(`  Skipped (malformed filename — rename to import): ${sanitizePathForDisplay(path)}`);
+          await markCompleted(path);
+        } else if (result.status === 'skipped' && result.skip_reason === 'no_extractable_text') {
+          // Fork: image-only document (e.g. scanned PDF). Informational and
+          // stable until the file changes, so checkpoint it as done.
+          serr(`  Skipped (no extractable text — scanned or empty document): ${sanitizePathForDisplay(path)}`);
           await markCompleted(path);
         } else if (result.status === 'skipped' && (result as any).error) {
           failedFiles.push({ path, error: String((result as any).error) });

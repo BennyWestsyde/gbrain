@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { extractText, isDocumentFilePath } from '../src/core/extract-text.ts';
+import { extractText, isDocumentFilePath, NoExtractableTextError } from '../src/core/extract-text.ts';
 import { isSyncable, slugifyPath } from '../src/core/sync.ts';
 
 describe('isDocumentFilePath', () => {
@@ -43,6 +43,13 @@ describe('extractText', () => {
     expect(text).toContain('The exclusionary rule');
     expect(text).toContain('applies to the states.');
     expect(text).not.toContain('-->');
+  });
+
+  test('a document with no text raises NoExtractableTextError (informational skip upstream)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-doc-'));
+    const empty = join(dir, 'blank.srt');
+    writeFileSync(empty, '1\n00:00:01,000 --> 00:00:02,000\n\n');
+    await expect(extractText(empty)).rejects.toBeInstanceOf(NoExtractableTextError);
   });
 
   test('unsupported types throw', async () => {

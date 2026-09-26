@@ -664,6 +664,10 @@ export async function runImport(
           console.error(`  Skipped (malformed filename — rename to import): ${sanitizePathForDisplay(relativePath)}`);
           malformedFileSkips++;
           completed.add(relativePath);
+        } else if (result.skip_reason === 'no_extractable_text') {
+          // Fork: image-only document (e.g. scanned PDF). Informational.
+          console.error(`  Skipped (no extractable text — scanned or empty document): ${sanitizePathForDisplay(relativePath)}`);
+          completed.add(relativePath);
         } else if (result.error && result.error !== 'unchanged') {
           errors++;
           console.error(`  Skipped ${relativePath}: ${result.error}`);
