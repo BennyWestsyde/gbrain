@@ -34,7 +34,8 @@
   },
   "scripts": {
     "dev": "bun run src/cli.ts",
-    "build": "bun build --compile --no-compile-autoload-bunfig --outfile bin/gbrain src/cli.ts",
+    "build": "bun build --compile --no-compile-autoload-bunfig --outfile bin/gbrain src/cli.ts && codesign --force --sign - bin/gbrain",
+    "build:local": "bun run build && mkdir -p \"$HOME/.bun/bin\" && ln -sf \"$PWD/bin/gbrain\" \"$HOME/.bun/bin/gbrain\" && \"$HOME/.bun/bin/gbrain\" --version",
     "build:all": "bun build --compile --no-compile-autoload-bunfig --target=bun-darwin-arm64 --outfile bin/gbrain-darwin-arm64 src/cli.ts && bun build --compile --no-compile-autoload-bunfig --target=bun-linux-x64 --outfile bin/gbrain-linux-x64 src/cli.ts",
     "build:admin": "cd admin && bun run build && cd .. && bun run scripts/build-admin-embedded.ts",
     "build:admin-embedded": "bun run scripts/build-admin-embedded.ts",

@@ -60,6 +60,12 @@ async function extractPdf(filePath: string, title: string): Promise<string> {
   // pdfjs-dist v5 needs DOMMatrix & co., which Bun/Node lack in some builds
   // (notably the compiled binary). Only fills globals that are missing.
   installDOMPolyfills();
+  // pdfjs's "fake worker" dynamically imports ./pdf.worker.mjs by path, which
+  // doesn't exist inside a `bun build --compile` binary ($bunfs). Importing
+  // the worker module here bundles it, and pdfjs uses globalThis.pdfjsWorker
+  // as its main-thread worker when present.
+  const g = globalThis as { pdfjsWorker?: unknown };
+  if (!g.pdfjsWorker) g.pdfjsWorker = await import('pdfjs-dist/legacy/build/pdf.worker.mjs');
   const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const buffer = readFileSync(filePath);
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
