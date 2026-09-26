@@ -93,6 +93,12 @@ export interface GBrainConfig {
    */
   embedding_fallback_base_url?: string;
   embedding_fallback_api_key?: string;
+  /**
+   * Fork: sender domains whose mail is personal when it is addressed to the
+   * account's own address alone (To + Cc). save_email_attachment refuses to
+   * open attachments of such messages. e.g. ["ttu.edu"].
+   */
+  email_personal_sender_domains?: string[];
 
   voyage_api_key?: string;
   /**

@@ -12,6 +12,8 @@ import { createHash } from 'crypto';
 import {
   type JxaRunner,
   MailAttachmentError,
+  isPersonalMessage,
+  isPersonalPage,
   listMailAttachments,
   messageRefFromFrontmatter,
   resolveDestDir,
@@ -23,10 +25,13 @@ import { operationsByName } from '../src/core/operations.ts';
 
 const REF = { account: 'me@example.edu', messageId: 'abc@mail.example', mailbox: 'Inbox' };
 
-function fakeMail(files: { name: string; bytes: string }[], calls: unknown[] = []): JxaRunner {
+const ENVELOPE = { sender: 'Office <office@other.edu>', recipients: ['me@example.edu', 'you@example.edu'], accountAddresses: ['me@example.edu'] };
+
+function fakeMail(files: { name: string; bytes: string }[], calls: unknown[] = [], envelope = ENVELOPE): JxaRunner {
   return async (_script, arg) => {
     const p = JSON.parse(arg);
     calls.push(p);
+    if (p.save) expect(Array.isArray(p.save.refuseIfPersonal)).toBe(true);
     const saved = (p.save?.indices ?? []).map((i: number) => {
       const out = `${p.save.dir}/${i}`;
       writeFileSync(out, files[i].bytes);
@@ -35,6 +40,7 @@ function fakeMail(files: { name: string; bytes: string }[], calls: unknown[] = [
     return JSON.stringify({
       subject: 'Week 3',
       mailbox: 'Archive',
+      ...envelope,
       attachments: files.map((f, index) => ({ index, name: f.name, size: f.bytes.length, downloaded: false })),
       saved,
     });
@@ -118,7 +124,7 @@ describe('resolveDestDir', () => {
 describe('list / save through Mail', () => {
   test('list infers MIME types and downloads nothing', async () => {
     const calls: any[] = [];
-    const listed = await listMailAttachments(REF, fakeMail([{ name: 'Slides.pptx', bytes: 'pp' }], calls));
+    const listed = await listMailAttachments(REF, [], fakeMail([{ name: 'Slides.pptx', bytes: 'pp' }], calls));
     expect(listed.mailbox).toBe('Archive');
     expect(listed.attachments[0]).toMatchObject({
       name: 'Slides.pptx',
@@ -132,13 +138,13 @@ describe('list / save through Mail', () => {
     const calls: any[] = [];
     const mail = fakeMail([{ name: 'syllabus.pdf', bytes: '%PDF-1' }, { name: '../evil.sh', bytes: 'rm -rf' }], calls);
 
-    const first = await saveMailAttachments(REF, { name: 'syllabus.pdf' }, dest, mail);
+    const first = await saveMailAttachments(REF, { name: 'syllabus.pdf' }, dest, [], mail);
     expect(first.saved.map(s => s.path)).toEqual([join(dest, 'syllabus.pdf')]);
     expect(calls[1].save.indices).toEqual([0]);
     expect(readFileSync(join(dest, 'syllabus.pdf'), 'utf8')).toBe('%PDF-1');
     expect(first.saved[0].sha256).toBe(createHash('sha256').update('%PDF-1').digest('hex'));
 
-    const again = await saveMailAttachments(REF, { all: true }, dest, mail);
+    const again = await saveMailAttachments(REF, { all: true }, dest, [], mail);
     const paths = again.saved.map(s => s.path);
     expect(paths[0]).toBe(join(dest, 'syllabus (1).pdf'));
     expect(dirname(paths[1])).toBe(dest);
@@ -156,14 +162,67 @@ describe('list / save through Mail', () => {
         saved: p.save ? [{ index: 0, error: 'Error: AppleEvent timed out.' }] : [],
       });
     };
-    const result = await saveMailAttachments(REF, { index: 0 }, dest, mail);
+    const result = await saveMailAttachments(REF, { index: 0 }, dest, [], mail);
     expect(result.saved).toEqual([]);
     expect(result.failed).toEqual([{ index: 0, name: 'big.zip', error: 'Error: AppleEvent timed out.' }]);
   });
 
   test('not-found from Mail surfaces as a typed error', async () => {
     const mail: JxaRunner = async () => JSON.stringify({ error: 'not_found', message: 'Message not found' });
-    await expect(listMailAttachments(REF, mail)).rejects.toMatchObject({ code: 'not_found' });
+    await expect(listMailAttachments(REF, [], mail)).rejects.toMatchObject({ code: 'not_found' });
+  });
+});
+
+describe('personal email rule', () => {
+  const own = ['grewestf@ttu.edu'];
+  const env = (sender: string, recipients: string[]) => ({ sender, recipients, accountAddresses: own });
+
+  test('TTU sender to only me is personal', () => {
+    expect(isPersonalMessage(env('"Robb, Andrew" <anrobb@ttu.edu>', ['grewestf@ttu.edu']), ['ttu.edu'])).toBe(true);
+    expect(isPersonalMessage(env('sds@TTU.edu', ['GREWESTF@ttu.edu']), ['ttu.edu'])).toBe(true);
+  });
+
+  test('anyone else on To/Cc, other domains, subdomains, or no rule: not personal', () => {
+    expect(isPersonalMessage(env('prof@ttu.edu', ['grewestf@ttu.edu', 'class@ttu.edu']), ['ttu.edu'])).toBe(false);
+    expect(isPersonalMessage(env('prof@ttu.edu', ['class-list@ttu.edu']), ['ttu.edu'])).toBe(false);
+    expect(isPersonalMessage(env('news@mailers.ttu.edu', ['grewestf@ttu.edu']), ['ttu.edu'])).toBe(false);
+    expect(isPersonalMessage(env('a@gmail.com', ['grewestf@ttu.edu']), ['ttu.edu'])).toBe(false);
+    expect(isPersonalMessage(env('prof@ttu.edu', []), ['ttu.edu'])).toBe(false);
+    expect(isPersonalMessage(env('prof@ttu.edu', ['grewestf@ttu.edu']), [])).toBe(false);
+  });
+
+  test('page flag from platform/mail', () => {
+    expect(isPersonalPage({ email_personal: true })).toBe(true);
+    expect(isPersonalPage({}, ['email', 'email-personal'])).toBe(true);
+    expect(isPersonalPage({ tags: ['email-personal'] })).toBe(true);
+    expect(isPersonalPage({ email_personal: false }, ['email'])).toBe(false);
+  });
+
+  test('list reports personal; save refuses before asking Mail to save anything', async () => {
+    const calls: any[] = [];
+    const mail = fakeMail([{ name: 'letter.pdf', bytes: 'x' }], calls,
+      { sender: 'sbs@ttu.edu', recipients: ['me@example.edu'], accountAddresses: ['me@example.edu'] });
+    const listed = await listMailAttachments(REF, ['ttu.edu'], mail);
+    expect(listed.personal).toBe(true);
+    await expect(saveMailAttachments(REF, { all: true }, dest, ['ttu.edu'], mail)).rejects.toMatchObject({ code: 'personal' });
+    expect(calls.every(c => !c.save)).toBe(true);
+    expect(readdirSync(dest)).toEqual([]);
+  });
+
+  test("Mail's own re-check at save time is honoured", async () => {
+    let n = 0;
+    const mail: JxaRunner = async (_s, arg) => {
+      const p = JSON.parse(arg);
+      n++;
+      if (p.save) {
+        expect(p.save.refuseIfPersonal).toEqual(['ttu.edu']);
+        return JSON.stringify({ error: 'personal', message: 'personal email' });
+      }
+      return JSON.stringify({ subject: 's', mailbox: 'Inbox', ...ENVELOPE,
+        attachments: [{ index: 0, name: 'a.pdf', size: 1, downloaded: true }], saved: [] });
+    };
+    await expect(saveMailAttachments(REF, { index: 0 }, dest, [' TTU.edu '], mail)).rejects.toMatchObject({ code: 'personal' });
+    expect(n).toBe(2);
   });
 });
 
@@ -175,6 +234,22 @@ describe('ops registration', () => {
       expect(op.localOnly).toBe(true);
     }
     expect(operationsByName.list_email_attachments.annotations?.readOnlyHint).toBe(true);
+    for (const name of ['list_email_attachments', 'save_email_attachment']) {
+      expect(operationsByName[name].description).toContain('email-personal');
+    }
+  });
+
+  test('save refuses a page flagged personal without touching Mail', async () => {
+    const op = operationsByName.save_email_attachment;
+    const ctx = {
+      config: {},
+      engine: {
+        getPage: async () => ({ slug: 'email/messages/x', frontmatter: {
+          email_account: 'me@example.edu', email_message_id: 'id@x', email_personal: true } }),
+        getTags: async () => ['email-personal'],
+      },
+    } as any;
+    await expect(op.handler(ctx, { slug: 'email/messages/x', all: true })).rejects.toMatchObject({ code: 'permission_denied' });
   });
 
   test('without slug, message_id and account are required', async () => {

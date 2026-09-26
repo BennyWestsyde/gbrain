@@ -36,7 +36,18 @@ export interface MailMessageAttachments {
   subject: string;
   account: string;
   mailbox: string;
+  /** Personal per `isPersonalMessage`; attachments must not be opened. */
+  personal: boolean;
   attachments: MailAttachmentInfo[];
+}
+
+/** Envelope fields read from Mail.app, used for the personal-mail rule. */
+export interface MailEnvelope {
+  sender: string;
+  /** To + Cc addresses. */
+  recipients: string[];
+  /** The account's own addresses. */
+  accountAddresses: string[];
 }
 
 export interface SavedAttachment extends MailAttachmentInfo {
@@ -48,7 +59,7 @@ export interface SavedAttachment extends MailAttachmentInfo {
 export type JxaRunner = (script: string, arg: string, timeoutMs: number) => Promise<string>;
 
 export class MailAttachmentError extends Error {
-  constructor(message: string, readonly code: 'not_found' | 'invalid' | 'mail_error' = 'mail_error') {
+  constructor(message: string, readonly code: 'not_found' | 'invalid' | 'personal' | 'mail_error' = 'mail_error') {
     super(message);
     this.name = 'MailAttachmentError';
   }
@@ -117,6 +128,40 @@ export function messageRefFromFrontmatter(frontmatter: Record<string, unknown>):
     );
   }
   return { account, messageId, mailbox: str('email_mailbox') };
+}
+
+export const PERSONAL_EMAIL_MESSAGE =
+  'This is a personal email (sent from a personal-mail domain to only the account owner). ' +
+  'Its attachments must not be opened by agents. Do not retry or work around this; ' +
+  'if the user needs the file, they will open it themselves.';
+
+function addressOf(value: string): string {
+  const angle = /<([^>]+)>/.exec(value);
+  return (angle ? angle[1] : value).trim().toLowerCase();
+}
+
+/**
+ * Personal mail: the sender's domain is one of `domains` (exact match, not
+ * subdomains) and every To/Cc recipient is one of the account's own
+ * addresses. Mail to a list, or with anyone else on To/Cc, is not personal.
+ */
+export function isPersonalMessage(envelope: MailEnvelope, domains: readonly string[]): boolean {
+  if (domains.length === 0) return false;
+  const sender = addressOf(envelope.sender);
+  const at = sender.lastIndexOf('@');
+  if (at < 0) return false;
+  const domain = sender.slice(at + 1);
+  if (!domains.some(d => d.trim().toLowerCase() === domain)) return false;
+  const own = new Set(envelope.accountAddresses.map(addressOf));
+  const recipients = envelope.recipients.map(addressOf).filter(Boolean);
+  return recipients.length > 0 && recipients.every(r => own.has(r));
+}
+
+/** The flag platform/mail writes on personal email pages. */
+export function isPersonalPage(frontmatter: Record<string, unknown>, tags: readonly string[] = []): boolean {
+  const flag = frontmatter.email_personal;
+  const fmTags = Array.isArray(frontmatter.tags) ? frontmatter.tags : [];
+  return flag === true || flag === 'true' || tags.includes('email-personal') || fmTags.includes('email-personal');
 }
 
 /**
@@ -206,6 +251,18 @@ function run(argv) {
   if (!msg) return JSON.stringify({ error: 'not_found', message: 'Message not found in Mail.app (deleted, or not synced on this Mac): ' + p.messageId });
 
   var subject = ''; try { subject = msg.subject() || ''; } catch (e) {}
+  var sender = ''; try { sender = msg.sender() || ''; } catch (e) {}
+  var recipients = [];
+  var recipientLists = [];
+  try { recipientLists.push(msg.toRecipients()); } catch (e) {}
+  try { recipientLists.push(msg.ccRecipients()); } catch (e) {}
+  for (var rl = 0; rl < recipientLists.length; rl++) {
+    for (var ri = 0; ri < recipientLists[rl].length; ri++) {
+      var addr = ''; try { addr = recipientLists[rl][ri].address() || ''; } catch (e) {}
+      if (addr) recipients.push(addr);
+    }
+  }
+  var accountAddresses = []; try { accountAddresses = account.emailAddresses(); } catch (e) {}
   var atts = []; try { atts = msg.mailAttachments(); } catch (e) {}
   var list = [];
   for (var i = 0; i < atts.length; i++) {
@@ -218,6 +275,14 @@ function run(argv) {
   }
 
   var saved = [];
+  if (p.save && p.save.refuseIfPersonal) {
+    var domain = sender.replace(/^.*<|>.*$/g, '').toLowerCase().split('@').pop();
+    var own = accountAddresses.map(function (x) { return String(x).toLowerCase(); });
+    var onlyOwn = recipients.length > 0 && recipients.every(function (r) { return own.indexOf(String(r).toLowerCase()) !== -1; });
+    if (p.save.refuseIfPersonal.indexOf(domain) !== -1 && onlyOwn) {
+      return JSON.stringify({ error: 'personal', message: 'personal email' });
+    }
+  }
   if (p.save) {
     for (var si = 0; si < p.save.indices.length; si++) {
       var idx = p.save.indices[si];
@@ -231,7 +296,8 @@ function run(argv) {
       }
     }
   }
-  return JSON.stringify({ subject: subject, mailbox: foundIn, attachments: list, saved: saved });
+  return JSON.stringify({ subject: subject, mailbox: foundIn, sender: sender, recipients: recipients,
+    accountAddresses: accountAddresses, attachments: list, saved: saved });
 }
 `;
 
@@ -260,13 +326,16 @@ interface JxaResult {
   message?: string;
   subject: string;
   mailbox: string;
+  sender?: string;
+  recipients?: string[];
+  accountAddresses?: string[];
   attachments: { index: number; name: string; size: number | null; downloaded: boolean | null }[];
   saved: { index: number; path?: string; error?: string }[];
 }
 
 async function callMail(
   ref: MailMessageRef,
-  save: { indices: number[]; dir: string } | undefined,
+  save: { indices: number[]; dir: string; refuseIfPersonal: string[] } | undefined,
   runner: JxaRunner,
 ): Promise<JxaResult> {
   const stdout = await runner(JXA_SCRIPT, JSON.stringify({ ...ref, save }), JXA_TIMEOUT_MS);
@@ -276,6 +345,7 @@ async function callMail(
   } catch {
     throw new MailAttachmentError(`Unexpected osascript output: ${stdout.slice(0, 200)}`);
   }
+  if (parsed.error === 'personal') throw new MailAttachmentError(PERSONAL_EMAIL_MESSAGE, 'personal');
   if (parsed.error) {
     throw new MailAttachmentError(parsed.message ?? parsed.error, parsed.error === 'not_found' ? 'not_found' : 'mail_error');
   }
@@ -294,13 +364,20 @@ function toInfo(a: JxaResult['attachments'][number]): MailAttachmentInfo {
 
 export async function listMailAttachments(
   ref: MailMessageRef,
+  personalDomains: readonly string[] = [],
   runner: JxaRunner = osascriptRunner,
 ): Promise<MailMessageAttachments> {
   const result = await callMail(ref, undefined, runner);
+  const envelope: MailEnvelope = {
+    sender: result.sender ?? '',
+    recipients: result.recipients ?? [],
+    accountAddresses: result.accountAddresses ?? [],
+  };
   return {
     subject: result.subject,
     account: ref.account,
     mailbox: result.mailbox,
+    personal: isPersonalMessage(envelope, personalDomains),
     attachments: result.attachments.map(toInfo),
   };
 }
@@ -340,10 +417,12 @@ export async function saveMailAttachments(
   ref: MailMessageRef,
   sel: AttachmentSelector,
   destDir: string | undefined,
+  personalDomains: readonly string[] = [],
   runner: JxaRunner = osascriptRunner,
 ): Promise<{ message: MailMessageAttachments; saved: SavedAttachment[]; failed: { index: number; name: string; error: string }[] }> {
   const dir = resolveDestDir(destDir);
-  const message = await listMailAttachments(ref, runner);
+  const message = await listMailAttachments(ref, personalDomains, runner);
+  if (message.personal) throw new MailAttachmentError(PERSONAL_EMAIL_MESSAGE, 'personal');
   const indices = selectAttachments(message.attachments, sel);
 
   mkdirSync(dir, { recursive: true });
@@ -351,7 +430,10 @@ export async function saveMailAttachments(
   // non-colliding name so an attachment name can never pick the path.
   const staging = mkdtempSync(join(tmpdir(), 'gbrain-mail-staging-'));
   try {
-    const result = await callMail(ref, { indices, dir: staging }, runner);
+    // The save call re-checks inside Mail, so the message can't change
+    // between the check above and the save.
+    const domains = personalDomains.map(d => d.trim().toLowerCase()).filter(Boolean);
+    const result = await callMail(ref, { indices, dir: staging, refuseIfPersonal: domains }, runner);
     const byIndex = new Map(message.attachments.map(a => [a.index, a]));
     const saved: SavedAttachment[] = [];
     const failed: { index: number; name: string; error: string }[] = [];
