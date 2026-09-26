@@ -11,6 +11,7 @@
  *   pathToSlug()  →  convert file paths to page slugs
  */
 
+import { isDocumentFilePath } from './extract-text.ts';
 import { SLUG_WORD_CHARS, SLUG_VARIATION_SELECTORS_RE } from './cjk.ts';
 // v0.37.7.0 #1169 submodule-detection helpers. Bottom-of-file already
 // aliases existsSync as `_existsSync` for other purposes; the top-of-file
@@ -276,12 +277,13 @@ function isAllowedByStrategy(path: string, strategy: SyncStrategy): boolean {
   // image NEVER imported incrementally (it only landed via `sync --full`).
   // Full and incremental must agree on the admission set.
   if (strategy === 'markdown') {
-    return isMarkdownFilePath(path) || (isMultimodalEnabled() && isImageFilePath(path));
+    return isMarkdownFilePath(path) || isDocumentFilePath(path) || (isMultimodalEnabled() && isImageFilePath(path));
   }
   if (strategy === 'code') return isCodeFilePath(path);
   // 'auto' / default: markdown + code, plus images when multimodal is on.
   return (
     isMarkdownFilePath(path) ||
+    isDocumentFilePath(path) ||
     isCodeFilePath(path) ||
     (isMultimodalEnabled() && isImageFilePath(path))
   );

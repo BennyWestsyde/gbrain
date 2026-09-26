@@ -1,4 +1,5 @@
 import { hasSourceFilesystemLock, withSourceFilesystemLock, currentSourceFilesystemSignal } from '../core/minions/source-filesystem.ts';
+import { isDocumentFilePath } from '../core/extract-text.ts';
 import { readdirSync, lstatSync, existsSync, mkdirSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
@@ -1191,10 +1192,11 @@ function isCollectibleForWalker(
     case 'code':
       return isCodeFilePath(path);
     case 'markdown':
-      return isMarkdownFilePath(path) || (multimodalOn && isImageFilePathFromSync(path));
+      return isMarkdownFilePath(path) || isDocumentFilePath(path) || (multimodalOn && isImageFilePathFromSync(path));
     case 'auto':
       return (
         isMarkdownFilePath(path) ||
+        isDocumentFilePath(path) ||
         isCodeFilePath(path) ||
         (multimodalOn && isImageFilePathFromSync(path))
       );

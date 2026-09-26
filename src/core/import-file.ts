@@ -1,4 +1,5 @@
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
+import { extractText, isDocumentFilePath } from './extract-text.ts';
 import { assertImportBase, sameCanonicalImport } from './page-state/import-guard.ts';
 import { stabilizeSafetyAssessments } from './persistence/reconcile-safety.ts';
 import { readSourceFileSync } from './minions/source-filesystem.ts';
@@ -1166,6 +1167,21 @@ export async function importFromFile(
   const lstat = lstatSync(filePath);
   if (lstat.isSymbolicLink()) {
     return { slug: relativePath, status: 'skipped', chunks: 0, error: `Skipping symlink: ${filePath}` };
+  }
+
+  // Fork: documents (PDF/Office/RTF/subtitles) import as their extracted
+  // text. Runs before the Markdown size cap — a large PDF often extracts to
+  // modest text.
+  if (isDocumentFilePath(relativePath)) {
+    const slug = slugifyPath(relativePath);
+    let extracted: string;
+    try {
+      extracted = await extractText(filePath);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { slug, status: 'skipped', chunks: 0, error: `Text extraction failed: ${msg}` };
+    }
+    return importFromContent(engine, slug, extracted, opts);
   }
 
   const stat = statSync(filePath);
