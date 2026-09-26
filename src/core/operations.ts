@@ -84,6 +84,7 @@ import { chunksOperations } from './ops/chunks.ts';
 import { ingestLogOperations } from './ops/ingest-log.ts';
 import { usageOperations } from './ops/usage.ts';
 import { filesOperations } from './ops/files.ts';
+import { mailAttachmentsOperations } from './ops/mail-attachments.ts';
 import { jobsOperations } from './ops/jobs.ts';
 import { orphansOperations } from './ops/orphans.ts';
 import { calibrationOperations } from './ops/calibration.ts';
@@ -217,6 +218,8 @@ export const operations: Operation[] = [
   ...skilloptOperations,
   // v0.47: open-loop engine (who is waiting on you) — ops/loops.ts
   ...loopsOperations,
+  // Fork: Apple Mail attachments on demand (localOnly) — ops/mail-attachments.ts
+  ...mailAttachmentsOperations,
 ];
 
 // ---------------------------------------------------------------------------
@@ -284,6 +287,8 @@ const OP_AREAS: Record<string, string> = {
   get_usage: 'admin',
   // files (localOnly)
   file_list: 'files', file_upload: 'files', file_url: 'files',
+  // fork: Apple Mail attachments (localOnly)
+  list_email_attachments: 'files', save_email_attachment: 'files',
   // jobs (Minions + agent lane)
   submit_job: 'jobs', get_job: 'jobs', list_jobs: 'jobs', cancel_job: 'jobs',
   retry_job: 'jobs', get_job_progress: 'jobs', pause_job: 'jobs',

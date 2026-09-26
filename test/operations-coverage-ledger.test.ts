@@ -96,6 +96,8 @@ const LEDGER: Record<string, string> = {
   file_list: 'test/file-upload-engine-context.test.ts',
   file_upload: 'test/file-upload-engine-context.test.ts',
   file_url: 'test/file-upload-engine-context.test.ts',
+  list_email_attachments: 'test/fork-mail-attachments.test.ts',
+  save_email_attachment: 'test/fork-mail-attachments.test.ts',
   submit_job: 'test/submit-queue-state.test.ts',
   get_job: 'test/jobs-ops-token-redaction.test.ts',
   list_jobs: 'test/jobs-ops-token-redaction.test.ts',
