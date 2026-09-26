@@ -58,6 +58,16 @@ describe('inferLinkType — image type', () => {
 // ─── extractEntityRefs ─────────────────────────────────────────
 
 describe('extractEntityRefs', () => {
+  test('extracts email integration refs (fork: Gmail collector digests)', () => {
+    const refs = extractEntityRefs('Digest: [Email-to-Brain Digest 2026-04-27](email/digests/2026-04-27).');
+    expect(refs.length).toBe(1);
+    expect(refs[0]).toMatchObject({
+      name: 'Email-to-Brain Digest 2026-04-27',
+      slug: 'email/digests/2026-04-27',
+      dir: 'email',
+    });
+  });
+
   test('extracts filesystem-relative refs ([Name](../people/slug.md))', () => {
     const refs = extractEntityRefs('Met with [Alice Chen](../people/alice-chen.md) at the office.');
     expect(refs.length).toBe(1);
