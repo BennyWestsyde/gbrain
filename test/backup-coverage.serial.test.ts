@@ -217,6 +217,42 @@ describe('computeBackupCoverage — source repos', () => {
     expect(s.totals.no_remote).toBe(1);
   });
 
+  test('fork: config.backup=external → info asset, no warn, even with no origin', async () => {
+    const repo = join(tmp, 'repo-ext');
+    initRepo(repo);
+    commitFile(repo, 'a.md', 'hello', 'init');
+    const other = join(tmp, 'repo-other');
+    initRepo(other);
+    commitFile(other, 'b.md', 'hi', 'init');
+    const engine = stubEngine({
+      sources: [
+        srcRow('src-ext', repo, { config: { federated: true, backup: 'external' } }),
+        // PGLite hands config back as a JSON string — must parse the same way.
+        srcRow('src-str', other, { config: JSON.stringify({ backup: 'external' }) }),
+      ],
+    });
+
+    const s = await computeBackupCoverage(engine, { localGitProbes: true });
+
+    const rows = s.assets.filter((a) => a.kind === 'source_repo');
+    expect(rows.map((a) => [a.id, a.state])).toEqual([['src-ext', 'info'], ['src-str', 'info']]);
+    expect(rows[0]?.detail).toContain('set-backup');
+    expect(s.overall).toBe('ok');
+    expect(s.totals.no_remote).toBe(0);
+  });
+
+  test('fork: config.backup other than external still warns no_remote', async () => {
+    const repo = join(tmp, 'repo-git');
+    initRepo(repo);
+    commitFile(repo, 'a.md', 'hello', 'init');
+    const engine = stubEngine({ sources: [srcRow('src-git', repo, { config: { backup: 'git' } })] });
+
+    const s = await computeBackupCoverage(engine, { localGitProbes: true });
+
+    expect(s.assets.find((a) => a.kind === 'source_repo')?.state).toBe('no_remote');
+    expect(s.overall).toBe('warn');
+  });
+
   test('repo one commit ahead of a local bare origin → unpushed, overall stays ok', async () => {
     const bare = join(tmp, 'bare.git');
     execFileSync('git', ['init', '--bare', '-b', 'main', bare], { stdio: ['ignore', 'pipe', 'pipe'] });

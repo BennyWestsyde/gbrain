@@ -24,9 +24,10 @@ import { probeOpenAICompat } from '../probes.ts';
  * `--embedding-model lmstudio:<id>` and `--embedding-dimensions <N>`. The
  * wizard refuses to pick implicit defaults.
  *
- * Scoped to the embedding touchpoint. LM Studio also serves chat; a chat
- * touchpoint is a reasonable follow-up but is not needed to make the
- * embedding path work.
+ * Fork: LM Studio also serves OpenAI-compatible chat with native tool calls,
+ * so the chat touchpoint lets dream/subagent phases run on the same server
+ * (`models.* = lmstudio:<loaded-model-id>`). The model id is whatever is
+ * loaded; LM Studio does not reuse prompt prefixes across requests.
  *
  * Operational note for users, not a gbrain defect: a loaded LM Studio
  * instance can degrade into a state where embedding latency rises by orders
@@ -63,6 +64,18 @@ export const lmstudio: Recipe = {
       // LM Studio's batch capacity depends on the loaded model + app config;
       // no static cap to declare.
       no_batch_cap: true,
+    },
+    chat: {
+      models: [], // user-driven; whatever chat model is loaded in LM Studio
+      supports_tools: true,
+      supports_subagent_loop: true,
+      supports_prompt_cache: false,
+      // Current local chat models (gemma-4, qwen3) reason before answering and
+      // bill it as completion tokens; give them the thinking output headroom.
+      thinking_by_default: true,
+      cost_per_1m_input_usd: 0,
+      cost_per_1m_output_usd: 0,
+      price_last_verified: '2026-09-25',
     },
   },
   /**

@@ -122,7 +122,8 @@ export function currentBackupEvidence(s: BackupStatus, now = Date.now()): Backup
     if (!s.degraded && Number.isFinite(age) && age >= 0 && age <= BACKUP_VERIFICATION_MAX_AGE_MS && !stale) return a;
     return { ...a, verification: { ...a.verification, state: 'stale' as const } };
   });
-  const repos = assets.filter(a => a.kind === 'source_repo' || a.kind === 'bootstrap_workspace');
+  // Fork: 'info' source repos are declared external backups (sources set-backup) — not git-verifiable.
+  const repos = assets.filter(a => (a.kind === 'source_repo' && a.state !== 'info') || a.kind === 'bootstrap_workspace');
   const recoverable = repos.filter(a => a.state === 'ok' && a.verification?.state === 'verified').length;
   return {
     ...s,

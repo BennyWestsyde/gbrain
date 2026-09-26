@@ -17,6 +17,7 @@ import { defaultResolveAuth } from '../../src/core/ai/gateway.ts';
 import { resolveSchemaEmbeddingDim } from '../../src/core/embedding-dim-check.ts';
 import { isModelPriceable } from '../../src/core/budget/budget-tracker.ts';
 import { withEnv } from '../helpers/with-env.ts';
+import { classifyCapabilities } from '../../src/core/ai/capabilities.ts';
 
 const MODEL = 'lmstudio:some-local-embedding-model';
 
@@ -37,6 +38,19 @@ describe('lmstudio recipe', () => {
     if (!tp) return;
     expect(tp.user_provided_models).toBe(true);
     expect(tp.models).toEqual([]);
+  });
+
+  test('offers a free, subagent-capable chat touchpoint (fork)', () => {
+    const tp = getRecipe('lmstudio')!.touchpoints.chat;
+    expect(tp).toBeDefined();
+    if (!tp) return;
+    expect(tp.models).toEqual([]);
+    expect(tp.supports_tools).toBe(true);
+    expect(tp.supports_subagent_loop).toBe(true);
+    expect(tp.thinking_by_default).toBe(true);
+    expect(tp.cost_per_1m_input_usd).toBe(0);
+    expect(tp.cost_per_1m_output_usd).toBe(0);
+    expect(classifyCapabilities('lmstudio:some-local-chat-model')).toBe('degraded:no_caching');
   });
 
   test('default auth on a keyless local server resolves to "Bearer unauthenticated"', () => {

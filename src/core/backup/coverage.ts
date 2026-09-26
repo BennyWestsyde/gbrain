@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 
 import { VERSION } from '../../version.ts';
 import type { BrainEngine } from '../engine.ts';
-import { loadAllSources } from '../sources-load.ts';
+import { loadAllSources, parseSourceConfig } from '../sources-load.ts';
 import { discoverGitRoot } from '../sync-git.ts';
 import { realpathOrResolve } from '../path-confine.ts';
 import { resolveBrainId } from '../brain-resolver.ts';
@@ -58,6 +58,15 @@ export interface BackupCoverageOpts {
   previousStatus?: BackupStatus;
   /** Provenance stamp for the status file (default 'cli'). */
   computedBy?: BackupComputedBy;
+}
+
+/** Fork: `sources.config.backup === 'external'` opts a source out of git backup evidence. */
+export function sourceBackupIsExternal(config: unknown): boolean {
+  try {
+    return parseSourceConfig(config).backup === 'external';
+  } catch {
+    return false;
+  }
 }
 
 function pushAsset(assets: BackupAssetVerdict[], a: BackupAssetVerdict): void {
@@ -152,6 +161,18 @@ export async function computeBackupCoverage(
     for (const row of rows) {
       if (row.archived) continue;
       if (!row.local_path) continue;
+      if (sourceBackupIsExternal(row.config)) {
+        // Fork: the operator declared this source backed up outside git
+        // (`gbrain sources set-backup <id> external`) — report, never nag.
+        pushAsset(assets, {
+          kind: 'source_repo',
+          id: row.id,
+          state: 'info',
+          detail: 'backup declared external (not git); revert with `gbrain sources set-backup <id> git`',
+          fix_argv: null,
+        });
+        continue;
+      }
       if (!existsSync(row.local_path)) {
         // The most disk-loss-adjacent state of all: a registered path that is
         // GONE. Surface it (unknown — it may live on another machine or have
