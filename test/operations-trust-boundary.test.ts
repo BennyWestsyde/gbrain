@@ -240,10 +240,13 @@ describe('mcpOperations filter — localOnly ops are excluded from the HTTP-expo
       'get_recent_transcripts',
       'get_skill_retention',
       'import_skill_proposal',
+      // fork: Apple Mail attachments — Mail.app is on this Mac.
+      'list_email_attachments',
       'migrate_embeddings',
       'prune_skill_revisions',
       'purge_deleted_pages',
       'retain_skill_revision',
+      'save_email_attachment',
       'sources_inspect',
       'sync_brain',
     ];
