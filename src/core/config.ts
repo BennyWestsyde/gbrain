@@ -81,6 +81,19 @@ export interface GBrainConfig {
    */
   openrouter_api_key?: string;
 
+  /** Fork: LM Studio API key (LMSTUDIO_API_KEY) for the `lmstudio:` recipe. */
+  lmstudio_api_key?: string;
+  /**
+   * Fork: optional fallback endpoint for embeddings on openai-compatible
+   * recipes (e.g. lmstudio). When a primary embed call fails, the sub-batch
+   * is retried once against this base URL. Must serve the same model and
+   * dimensions — the gateway's dim check rejects a mismatch. The fallback
+   * gets `embedding_fallback_api_key` or no key; the primary key is never
+   * sent to it. Env: GBRAIN_EMBEDDING_FALLBACK_BASE_URL / _API_KEY.
+   */
+  embedding_fallback_base_url?: string;
+  embedding_fallback_api_key?: string;
+
   voyage_api_key?: string;
   /**
    * Alibaba DashScope API key (#3500). File-plane slot so config.json's

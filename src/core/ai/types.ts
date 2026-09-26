@@ -476,6 +476,8 @@ export interface AIGatewayConfig {
    * synthesize flows in their respective handlers.
    */
   chat_fallback_chain?: string[];
+  /** Fork: fallback endpoint for openai-compatible embedding recipes. See GBrainConfig. */
+  embedding_fallback?: { base_url: string; api_key?: string };
   /** Optional per-provider base URL override (openai-compatible variants). */
   base_urls?: Record<string, string>;
   /** Optional chat providerOptions overrides keyed by recipe id or "recipe:modelId". */

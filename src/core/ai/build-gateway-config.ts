@@ -85,10 +85,19 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     expansion_model: c.expansion_model,
     chat_model: c.chat_model,
     chat_fallback_chain: c.chat_fallback_chain,
+    embedding_fallback: embeddingFallback(c),
     base_urls: { ...envBaseUrls, ...(c.provider_base_urls ?? {}) }, // config wins over env
     provider_chat_options: c.provider_chat_options,
     // #1249 empty-string drop + GEMINI alias applied inside mergedProviderEnv.
     // #3350 file-plane native base-URL fold layered on top (env wins).
     env: foldNativeBaseUrlsFromFilePlane(fileCfg, mergedProviderEnv(c, process.env)),
   };
+}
+
+/** Fork: env overrides config, matching the fork's pre-gateway embedding.ts. */
+function embeddingFallback(c: GBrainConfig): AIGatewayConfig['embedding_fallback'] {
+  const base_url = (process.env.GBRAIN_EMBEDDING_FALLBACK_BASE_URL || c.embedding_fallback_base_url || '').trim();
+  if (!base_url) return undefined;
+  const api_key = process.env.GBRAIN_EMBEDDING_FALLBACK_API_KEY || c.embedding_fallback_api_key;
+  return { base_url, ...(api_key ? { api_key } : {}) };
 }

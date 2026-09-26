@@ -36,6 +36,7 @@ export function mergedProviderEnv(
   if (cfg?.openai_api_key) fromConfig.OPENAI_API_KEY = cfg.openai_api_key;
   if (cfg?.anthropic_api_key) fromConfig.ANTHROPIC_API_KEY = cfg.anthropic_api_key;
   if (cfg?.openrouter_api_key) fromConfig.OPENROUTER_API_KEY = cfg.openrouter_api_key;
+  if (cfg?.lmstudio_api_key) fromConfig.LMSTUDIO_API_KEY = cfg.lmstudio_api_key; // fork
   if (cfg?.voyage_api_key) fromConfig.VOYAGE_API_KEY = cfg.voyage_api_key;
   if (cfg?.dashscope_api_key) fromConfig.DASHSCOPE_API_KEY = cfg.dashscope_api_key;
   if (cfg?.deepseek_api_key) fromConfig.DEEPSEEK_API_KEY = cfg.deepseek_api_key;

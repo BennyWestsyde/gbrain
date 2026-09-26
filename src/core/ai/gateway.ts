@@ -443,6 +443,7 @@ export function configureGateway(config: AIGatewayConfig): void {
     expansion_model: config.expansion_model ?? DEFAULT_EXPANSION_MODEL,
     chat_model: config.chat_model ?? DEFAULT_CHAT_MODEL,
     chat_fallback_chain: config.chat_fallback_chain,
+    embedding_fallback: config.embedding_fallback, // fork
     // v0.35.0.0+: reranker_model stays undefined when unset — reranker is
     // opt-in and pulling DEFAULT_RERANKER_MODEL into every gateway start
     // would silently register a third-party model id on brains that never
@@ -1460,6 +1461,42 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
   }
 }
 
+// ─── Fork: embedding fallback endpoint ───────────────────────────────────
+// A second client for the same openai-compatible recipe + model, pointed at
+// cfg.embedding_fallback.base_url. embedSubBatch retries a failed sub-batch
+// on it once. The fallback's auth env is replaced wholesale so the primary's
+// key never reaches the fallback host.
+let _warnedEmbeddingFallback = false;
+
+function resolveEmbeddingFallbackModel(recipe: Recipe, modelId: string): any | null {
+  const cfg = requireConfig();
+  const fb = cfg.embedding_fallback;
+  if (!fb?.base_url || recipe.implementation !== 'openai-compatible') return null;
+  if ((cfg.base_urls?.[recipe.id] ?? recipe.base_url_default) === fb.base_url) return null;
+  const cacheKey = `emb-fallback:${recipe.id}:${modelId}:${fb.base_url}`;
+  const cached = _modelCache.get(cacheKey);
+  if (cached) return cached;
+  const env = { ...cfg.env };
+  for (const k of [...(recipe.auth_env?.required ?? []), ...(recipe.auth_env?.optional ?? [])]) {
+    if (!/_(BASE_)?URL$/.test(k)) env[k] = fb.api_key ?? '';
+  }
+  const model = instantiateEmbedding(recipe, modelId, {
+    ...cfg,
+    base_urls: { ...(cfg.base_urls ?? {}), [recipe.id]: fb.base_url },
+    env,
+  });
+  _modelCache.set(cacheKey, model);
+  return model;
+}
+
+/** Errors a different endpoint can't fix are not retried on the fallback. */
+function isEmbeddingFallbackEligible(err: unknown, opts?: EmbedOpts): boolean {
+  if (isAIInvocationPolicyError(err)) return false;
+  if (err instanceof AIConfigError) return false; // e.g. dim mismatch, bad model string
+  if (opts?.abortSignal?.aborted) return false; // the caller's own deadline
+  return true;
+}
+
 /** Minimum sub-batch size before we give up splitting and just throw. */
 const MIN_SUB_BATCH = 1;
 
@@ -1804,6 +1841,7 @@ async function embedSubBatch(
   recipe: Recipe,
   modelId: string,
   opts?: EmbedOpts,
+  onFallback = false,
 ): Promise<Float32Array[]> {
   try {
     const callTransport = () => invokeAI({ operation: 'gateway.embed', kind: 'embedding', model: `${recipe.id}:${modelId}`,
@@ -1857,9 +1895,20 @@ async function embedSubBatch(
     if (isTokenLimitError(err) && texts.length > MIN_SUB_BATCH) {
       shrinkOnMiss(recipe);
       const mid = Math.ceil(texts.length / 2);
-      const left = await embedSubBatch(texts.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId, opts);
-      const right = await embedSubBatch(texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts);
+      const left = await embedSubBatch(texts.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId, opts, onFallback);
+      const right = await embedSubBatch(texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts, onFallback);
       return [...left, ...right];
+    }
+    if (!onFallback && isEmbeddingFallbackEligible(err, opts)) {
+      const fallbackModel = resolveEmbeddingFallbackModel(recipe, modelId);
+      if (fallbackModel) {
+        if (!_warnedEmbeddingFallback) {
+          _warnedEmbeddingFallback = true;
+          const reason = err instanceof Error ? err.message : String(err);
+          console.warn(`[gbrain] embed(${recipe.id}:${modelId}) primary failed (${reason.slice(0, 160)}); retrying on fallback ${requireConfig().embedding_fallback!.base_url}`);
+        }
+        return embedSubBatch(texts, fallbackModel, providerOpts, expectedDims, recipe, modelId, opts, true);
+      }
     }
     throw normalizeAIError(err, `embed(${recipe.id}:${modelId})`);
   }
