@@ -41,12 +41,26 @@ export interface GBrainConfig {
    */
   storage?: unknown;
   /**
-   * Fork-only: override the embedding model / dimension used by
+   * Fork-only: override the embedding model / dimension / endpoint used by
    * `src/core/embedding.ts`. Defaults preserve upstream behavior
-   * (text-embedding-3-large @ 1536). See platform/memory/UPSTREAM_SYNC.md.
+   * (text-embedding-3-large @ 1536 via api.openai.com). See
+   * platform/memory/UPSTREAM_SYNC.md.
    */
   embedding_model?: string;
   embedding_dimensions?: number;
+  /** Base URL for the embeddings endpoint (e.g. LM Studio at circuitbaker). */
+  embedding_base_url?: string;
+  /** API key for the embeddings endpoint when it differs from openai_api_key. */
+  embedding_api_key?: string;
+  /**
+   * Optional fallback embeddings endpoint. When the primary
+   * (`embedding_base_url`) errors, each request tries the fallback once
+   * before the retry loop backs off. Must serve the same model and
+   * dimension as the primary so returned vectors stay compatible with
+   * existing stored embeddings.
+   */
+  embedding_fallback_base_url?: string;
+  embedding_fallback_api_key?: string;
 }
 
 /**

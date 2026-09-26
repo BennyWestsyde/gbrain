@@ -34,14 +34,38 @@ const BASE_DELAY_MS = 4000;
 const MAX_DELAY_MS = 120000;
 const BATCH_SIZE = 100;
 
-let client: OpenAI | null = null;
+let primaryClient: OpenAI | null = null;
+let fallbackClient: OpenAI | null | undefined = undefined; // undefined = uninitialized, null = configured absent
 
-function getClient(): OpenAI {
-  if (!client) {
-    const apiKey = process.env.OPENAI_API_KEY || loadConfig()?.openai_api_key;
-    client = new OpenAI({ apiKey });
+function getPrimaryClient(): OpenAI {
+  if (!primaryClient) {
+    const cfg = loadConfig();
+    const baseURL = process.env.GBRAIN_EMBEDDING_BASE_URL || cfg?.embedding_base_url;
+    const apiKey = process.env.GBRAIN_EMBEDDING_API_KEY
+      || (baseURL ? cfg?.embedding_api_key : undefined)
+      || process.env.OPENAI_API_KEY
+      || cfg?.openai_api_key;
+    primaryClient = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   }
-  return client;
+  return primaryClient;
+}
+
+// Returns null when no fallback is configured (either via env or config file).
+function getFallbackClient(): OpenAI | null {
+  if (fallbackClient !== undefined) return fallbackClient;
+  const cfg = loadConfig();
+  const baseURL = process.env.GBRAIN_EMBEDDING_FALLBACK_BASE_URL
+    || cfg?.embedding_fallback_base_url;
+  if (!baseURL) {
+    fallbackClient = null;
+    return null;
+  }
+  const apiKey = process.env.GBRAIN_EMBEDDING_FALLBACK_API_KEY
+    || cfg?.embedding_fallback_api_key
+    || process.env.OPENAI_API_KEY
+    || cfg?.openai_api_key;
+  fallbackClient = new OpenAI({ apiKey, baseURL });
+  return fallbackClient;
 }
 
 export async function embed(text: string): Promise<Float32Array> {
@@ -77,29 +101,58 @@ export async function embedBatch(
   return results;
 }
 
+function buildRequest(texts: string[]) {
+  const request: {
+    model: string;
+    input: string[];
+    dimensions?: number;
+    encoding_format?: 'float' | 'base64';
+  } = { model: MODEL, input: texts };
+  if (SEND_DIMENSIONS) request.dimensions = DIMENSIONS;
+  // Force `float` for local/OSS backends. The OpenAI SDK defaults to
+  // base64 (bandwidth win against OpenAI's servers), but LM Studio /
+  // nomic return raw floats regardless — the SDK's base64 decoder
+  // then produces garbage. Only override when using a non-default
+  // model so upstream OpenAI behavior stays byte-identical.
+  if (_cfgModel !== undefined) request.encoding_format = 'float';
+  return request;
+}
+
+async function callEmbeddings(client: OpenAI, texts: string[]): Promise<Float32Array[]> {
+  const response = await client.embeddings.create(buildRequest(texts));
+  const sorted = response.data.sort((a, b) => a.index - b.index);
+  return sorted.map(d => new Float32Array(d.embedding));
+}
+
 async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
+  let lastPrimaryError: unknown = null;
+
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const request: {
-        model: string;
-        input: string[];
-        dimensions?: number;
-        encoding_format?: 'float' | 'base64';
-      } = { model: MODEL, input: texts };
-      if (SEND_DIMENSIONS) request.dimensions = DIMENSIONS;
-      // Force `float` for local/OSS backends. The OpenAI SDK defaults to
-      // base64 (bandwidth win against OpenAI's servers), but LM Studio /
-      // nomic return raw floats regardless — the SDK's base64 decoder
-      // then produces garbage. Only override when using a non-default
-      // model so upstream OpenAI behavior stays byte-identical.
-      if (_cfgModel !== undefined) request.encoding_format = 'float';
-      const response = await getClient().embeddings.create(request);
-
-      // Sort by index to maintain order
-      const sorted = response.data.sort((a, b) => a.index - b.index);
-      return sorted.map(d => new Float32Array(d.embedding));
+      return await callEmbeddings(getPrimaryClient(), texts);
     } catch (e: unknown) {
-      if (attempt === MAX_RETRIES - 1) throw e;
+      lastPrimaryError = e;
+
+      // Try the fallback endpoint immediately when configured. Kept
+      // inside the retry loop so a flapping primary still gets another
+      // shot on the next attempt — the fallback is a safety net, not a
+      // permanent switch.
+      const fb = getFallbackClient();
+      if (fb) {
+        try {
+          const result = await callEmbeddings(fb, texts);
+          console.warn(
+            `[embedding] primary failed (${describeError(e)}), served from fallback`,
+          );
+          return result;
+        } catch (fe) {
+          console.warn(
+            `[embedding] primary and fallback both failed (primary: ${describeError(e)}, fallback: ${describeError(fe)})`,
+          );
+        }
+      }
+
+      if (attempt === MAX_RETRIES - 1) throw lastPrimaryError;
 
       // Check for rate limit with Retry-After header
       let delay = exponentialDelay(attempt);
@@ -120,6 +173,12 @@ async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
 
   // Should not reach here
   throw new Error('Embedding failed after all retries');
+}
+
+function describeError(e: unknown): string {
+  if (e instanceof OpenAI.APIError) return `${e.status} ${e.name}`;
+  if (e instanceof Error) return e.message.slice(0, 120);
+  return String(e).slice(0, 120);
 }
 
 function exponentialDelay(attempt: number): number {
