@@ -444,6 +444,7 @@ export function configureGateway(config: AIGatewayConfig): void {
     chat_model: config.chat_model ?? DEFAULT_CHAT_MODEL,
     chat_fallback_chain: config.chat_fallback_chain,
     embedding_fallback: config.embedding_fallback, // fork
+    embedding_base_url: config.embedding_base_url, // fork
     // v0.35.0.0+: reranker_model stays undefined when unset — reranker is
     // opt-in and pulling DEFAULT_RERANKER_MODEL into every gateway start
     // would silently register a third-party model id on brains that never
@@ -1375,7 +1376,7 @@ function noKeyOnce(modelStr: string, keyName: string, query: string, docCount: n
 async function resolveEmbeddingProvider(modelStr: string): Promise<{ model: any; recipe: Recipe; modelId: string }> {
   const { parsed, recipe } = resolveRecipe(modelStr);
   assertTouchpoint(recipe, 'embedding', parsed.modelId);
-  const cfg = requireConfig();
+  const cfg = embeddingEndpointConfig(recipe, requireConfig());
 
   const cacheKey = `emb:${recipe.id}:${parsed.modelId}:${cfg.base_urls?.[recipe.id] ?? ''}`;
   const cached = _modelCache.get(cacheKey);
@@ -1472,21 +1473,33 @@ function resolveEmbeddingFallbackModel(recipe: Recipe, modelId: string): any | n
   const cfg = requireConfig();
   const fb = cfg.embedding_fallback;
   if (!fb?.base_url || recipe.implementation !== 'openai-compatible') return null;
-  if ((cfg.base_urls?.[recipe.id] ?? recipe.base_url_default) === fb.base_url) return null;
+  const primary = embeddingEndpointConfig(recipe, cfg);
+  if ((primary.base_urls?.[recipe.id] ?? recipe.base_url_default) === fb.base_url) return null;
   const cacheKey = `emb-fallback:${recipe.id}:${modelId}:${fb.base_url}`;
   const cached = _modelCache.get(cacheKey);
   if (cached) return cached;
-  const env = { ...cfg.env };
-  for (const k of [...(recipe.auth_env?.required ?? []), ...(recipe.auth_env?.optional ?? [])]) {
-    if (!/_(BASE_)?URL$/.test(k)) env[k] = fb.api_key ?? '';
-  }
-  const model = instantiateEmbedding(recipe, modelId, {
-    ...cfg,
-    base_urls: { ...(cfg.base_urls ?? {}), [recipe.id]: fb.base_url },
-    env,
-  });
+  const model = instantiateEmbedding(recipe, modelId, withEndpoint(recipe, cfg, fb.base_url, fb.api_key));
   _modelCache.set(cacheKey, model);
   return model;
+}
+
+// Fork: cfg.embedding_base_url moves an openai-compatible recipe's embedding
+// calls to their own endpoint; its chat calls keep cfg.base_urls.
+function embeddingEndpointConfig(recipe: Recipe, cfg: AIGatewayConfig): AIGatewayConfig {
+  const url = cfg.embedding_base_url;
+  if (!url || recipe.implementation !== 'openai-compatible') return cfg;
+  if ((cfg.base_urls?.[recipe.id] ?? recipe.base_url_default) === url) return cfg;
+  return withEndpoint(recipe, cfg, url, undefined);
+}
+
+/** cfg pointed at another host for this recipe, with the recipe's auth env
+ *  replaced wholesale so the provider's key never reaches that host. */
+function withEndpoint(recipe: Recipe, cfg: AIGatewayConfig, baseUrl: string, apiKey: string | undefined): AIGatewayConfig {
+  const env = { ...cfg.env };
+  for (const k of [...(recipe.auth_env?.required ?? []), ...(recipe.auth_env?.optional ?? [])]) {
+    if (!/_(BASE_)?URL$/.test(k)) env[k] = apiKey ?? '';
+  }
+  return { ...cfg, base_urls: { ...(cfg.base_urls ?? {}), [recipe.id]: baseUrl }, env };
 }
 
 /** Errors a different endpoint can't fix are not retried on the fallback. */
