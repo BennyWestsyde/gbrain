@@ -51,6 +51,10 @@ export const DEFAULT_SOURCE_BOOSTS: Record<string, number> = {
   // `dream_generated: true` in their frontmatter; demote here keeps them
   // findable but ranked below all curated user content.
   'extracts/': 0.3,
+  // hearth's mail collector files promotions, newsletters, job postings and
+  // automated mail under email/noise/<category>/. Demote-not-exclude, like
+  // archive/: facts still get pulled out of it, and a strong match surfaces.
+  'email/noise/': 0.4,
 };
 
 /**
