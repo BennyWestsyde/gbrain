@@ -242,8 +242,8 @@ async function classifyBatch(paragraphs: string[]): Promise<Array<'high' | 'medi
 
   const system = [
     'Classify each paragraph into HIGH, MEDIUM, or LOW notability for personal-knowledge memory:',
-    '- HIGH: Life events (separation, death, birth, hospitalization), major commitments,',
-    '  relationship status changes, health changes, emotional breakthroughs, financial decisions.',
+    '- HIGH: Life events (separation, death, birth), major commitments,',
+    '  relationship status changes, emotional breakthroughs, financial decisions.',
     '- MEDIUM: Durable preferences, beliefs, strong opinions that reveal character.',
     '- LOW: Logistical noise, restaurant orders, routine scheduling.',
     '  Label honestly — LOW is a real classification, not a skip; every paragraph gets a tier.',
