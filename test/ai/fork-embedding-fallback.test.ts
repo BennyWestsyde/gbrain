@@ -109,3 +109,54 @@ describe('embedding fallback', () => {
     expect(buildGatewayConfig({ engine: 'postgres' } as any).embedding_fallback).toBeUndefined();
   });
 });
+
+describe('embedding_base_url', () => {
+  test('embedding calls go to embedding_base_url, without the provider key', async () => {
+    const provider = fakeEmbeddingServer({ dims: 8 });
+    const local = fakeEmbeddingServer({ dims: 8 });
+    servers.push(provider, local);
+    configureGateway({
+      embedding_model: 'lmstudio:nomic-test',
+      embedding_dimensions: 8,
+      base_urls: { lmstudio: provider.url },
+      embedding_base_url: local.url,
+      env: { LMSTUDIO_API_KEY: 'primary-secret' },
+    });
+
+    const out = await embed(['a', 'b'], { maxRetries: 0 });
+
+    expect(out).toHaveLength(2);
+    expect(local.seen.calls).toBe(1);
+    expect(provider.seen.calls).toBe(0);
+    expect(local.seen.auth).not.toContain('primary-secret');
+  });
+
+  test('a failing embedding_base_url still falls back', async () => {
+    const local = fakeEmbeddingServer({ status: 500, dims: 8 });
+    const fallback = fakeEmbeddingServer({ dims: 8 });
+    servers.push(local, fallback);
+    configureGateway({
+      embedding_model: 'lmstudio:nomic-test',
+      embedding_dimensions: 8,
+      base_urls: { lmstudio: 'http://127.0.0.1:1/v1' },
+      embedding_base_url: local.url,
+      embedding_fallback: { base_url: fallback.url },
+      env: {},
+    });
+    await embed(['a'], { maxRetries: 0 });
+    expect(local.seen.calls).toBeGreaterThan(0);
+    expect(fallback.seen.calls).toBe(1);
+  });
+
+  test('buildGatewayConfig reads embedding_base_url, env first', () => {
+    const base = { engine: 'postgres', embedding_base_url: ' http://127.0.0.1:8765/v1 ' } as any;
+    expect(buildGatewayConfig(base).embedding_base_url).toBe('http://127.0.0.1:8765/v1');
+    expect(buildGatewayConfig({ engine: 'postgres' } as any).embedding_base_url).toBeUndefined();
+    process.env.GBRAIN_EMBEDDING_BASE_URL = 'http://env/v1';
+    try {
+      expect(buildGatewayConfig(base).embedding_base_url).toBe('http://env/v1');
+    } finally {
+      delete process.env.GBRAIN_EMBEDDING_BASE_URL;
+    }
+  });
+});

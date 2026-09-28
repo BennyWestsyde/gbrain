@@ -92,6 +92,15 @@ export interface GBrainConfig {
    * sent to it. Env: GBRAIN_EMBEDDING_FALLBACK_BASE_URL / _API_KEY.
    */
   embedding_fallback_base_url?: string;
+  /**
+   * Fork: endpoint for embedding calls only, for an openai-compatible
+   * embedding recipe. The recipe's other calls (chat, expansion) stay on
+   * provider_base_urls, so one LM Studio provider can embed on a local server
+   * and chat on a remote one without changing the embedding model id or its
+   * stored-vector signature. The provider's key is not sent there.
+   * Env: GBRAIN_EMBEDDING_BASE_URL.
+   */
+  embedding_base_url?: string;
   embedding_fallback_api_key?: string;
   /**
    * Fork: sender domains whose mail is personal when it is addressed to the
