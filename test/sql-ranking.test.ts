@@ -261,6 +261,16 @@ describe('resolveHardExcludes', () => {
   });
 });
 
+describe('email noise demote (hearth mail)', () => {
+  test('email/noise/ is demoted, other email/ is not', () => {
+    expect(DEFAULT_SOURCE_BOOSTS['email/noise/']).toBe(0.4);
+    expect(DEFAULT_SOURCE_BOOSTS['email/']).toBeUndefined();
+    expect(DEFAULT_HARD_EXCLUDES).not.toContain('email/noise/');
+    const sql = buildSourceFactorCase('p.slug', resolveBoostMap(), undefined);
+    expect(sql).toContain("WHEN p.slug LIKE 'email/noise/%' THEN 0.4");
+  });
+});
+
 // issue #1777 — archive/ moved from hard-exclude to a 0.5 source-boost demote.
 describe('archive demote (issue #1777)', () => {
   test('archive/ is NOT a default hard-exclude (regression guard)', () => {
