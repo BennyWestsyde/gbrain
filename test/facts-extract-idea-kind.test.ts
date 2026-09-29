@@ -123,7 +123,8 @@ describe('buildExtractorSystem — prompt shape', () => {
       expect(system).toContain('- Resolve relative dates');
       expect(system).toContain('- Never extract health, medical, disability or accommodation details');
       expect(system).toContain('- Never extract identifiers of other people');
-      expect(system).toContain('- Marketing copy says nothing about a person');
+      expect(system).toContain('- Skip ads entirely');
+      expect(system).toContain('Job listings, club and');
       expect(system).toContain('Never emit the same claim twice.');
       const high = system.slice(system.indexOf('* "high":'), system.indexOf('* "medium":'));
       expect(high).not.toMatch(/health|hospital/i);
