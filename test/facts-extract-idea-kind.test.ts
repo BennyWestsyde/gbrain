@@ -114,6 +114,22 @@ describe('buildExtractorSystem — prompt shape', () => {
     expect(buildExtractorSystem(false)).toBe(buildExtractorSystem(false));
     expect(buildExtractorSystem(true)).not.toBe(buildExtractorSystem(false));
   });
+
+  // Fork (hearth #15): the house rules that lived in the operator appendix.
+  test('both variants carry the house rules; health is not a notability signal', () => {
+    for (const admitsLow of [true, false]) {
+      const system = buildExtractorSystem(admitsLow);
+      expect(system).toContain('- Every fact names its subject');
+      expect(system).toContain('- Resolve relative dates');
+      expect(system).toContain('- Never extract health, medical, disability or accommodation details');
+      expect(system).toContain('- Never extract identifiers of other people');
+      expect(system).toContain('- Skip ads entirely');
+      expect(system).toContain('Job listings, club and');
+      expect(system).toContain('Never emit the same claim twice.');
+      const high = system.slice(system.indexOf('* "high":'), system.indexOf('* "medium":'));
+      expect(high).not.toMatch(/health|hospital/i);
+    }
+  });
 });
 
 describe('admission wiring — which prompt variant each caller gets', () => {
