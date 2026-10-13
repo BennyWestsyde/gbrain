@@ -70,7 +70,9 @@ export const HANDLER_DEFAULT_TIMEOUT_MS: Readonly<Record<string, number>> = {
   // call + a few writes. Was missing from this map, so it inherited the tight
   // null-default and got dead-lettered mid-generation on slow chat providers
   // (facts silently lost) — exactly the failure this file exists to prevent.
-  'facts-absorb': TEN_MIN_MS,
+  // Fork (hearth#36): a long page is now up to MAX_TURN_CHUNKS (6) extractor
+  // calls in one job, at up to ~4 min each on the local 26B.
+  'facts-absorb': THIRTY_MIN_MS,
   // Per-page contextual reindex jobs process chunks sequentially with one
   // rate-leased LLM synopsis call per chunk; large transcript pages need more
   // than the standard 30-min long-job budget.

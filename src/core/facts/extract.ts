@@ -210,6 +210,13 @@ export interface ExtractInput {
     allowed: readonly FactNotability[];
     invalid: 'drop';
   };
+  /**
+   * Fork (hearth#36): a turn longer than MAX_TURN_TEXT_CHARS is split into
+   * several turns (see `splitTurnText`) instead of cut at the cap. The page
+   * backstop sets it, so a long page (a busy day's email digest) is read to
+   * the end; raw conversation turns keep the cap.
+   */
+  splitLongTurn?: boolean;
 }
 
 /** A pre-INSERT fact ready for the engine.insertFact path. */
@@ -346,6 +353,38 @@ export function buildExtractorSystem(admitsLow: boolean): string {
 }
 
 const MAX_TURN_TEXT_CHARS = 8000;
+/**
+ * Fork (hearth#36): the most turns one split page is extracted as. Each is
+ * one extractor call (~1-4 min on the local 26B), and the whole page runs in
+ * one facts-absorb job (handler-timeouts.ts), so this bounds the job's time.
+ * 6 x 8,000 chars covers the longest email digest seen (44,889 chars).
+ */
+export const MAX_TURN_CHUNKS = 6;
+// Strongest first. A digest entry is one email ("\n- **[time] sender**");
+// a split there never cuts a message in two.
+const TURN_SPLIT_SEPARATORS = ['\n- **[', '\n\n', '\n'];
+
+/**
+ * Fork (hearth#36): `text` as turns of at most `max` chars, cut at the
+ * strongest boundary in the back half of each window (a digest entry, a
+ * blank line, a line break), else mid-line. Packed greedily from the start,
+ * so appending to a page leaves its earlier turns unchanged.
+ */
+export function splitTurnText(text: string, max: number = MAX_TURN_TEXT_CHARS): string[] {
+  const turns: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = max;
+    for (const sep of TURN_SPLIT_SEPARATORS) {
+      const at = rest.lastIndexOf(sep, max - 1);
+      if (at >= max / 2) { cut = at; break; }
+    }
+    turns.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  turns.push(rest);
+  return turns.map(t => t.trim()).filter(Boolean);
+}
 
 /**
  * #4863 — JSON Schema for the extractor reply, sent as `responseSchema` on
@@ -472,8 +511,39 @@ export class FactsExtractionError extends Error {
   }
 }
 
-/** Strict extraction contract for callers that persist completion authority. */
+/**
+ * Strict extraction contract for callers that persist completion authority.
+ *
+ * Fork (hearth#36): with `splitLongTurn`, a turn over the cap is extracted
+ * as up to MAX_TURN_CHUNKS turns and their facts are concatenated (up to
+ * `maxFactsPerTurn` each). Any turn's failure is the whole call's outcome,
+ * so a retried job never publishes half a page.
+ */
 export async function extractFactsFromTurnWithOutcome(
+  input: ExtractInput,
+): Promise<ExtractFactsOutcome> {
+  if (!input.splitLongTurn || input.isDreamGenerated || !input.turnText
+      || input.turnText.length <= MAX_TURN_TEXT_CHARS) {
+    return extractFactsFromOneTurn(input);
+  }
+  const turns = splitTurnText(input.turnText);
+  const kept = turns.slice(0, MAX_TURN_CHUNKS);
+  const unread = turns.slice(MAX_TURN_CHUNKS).reduce((n, t) => n + t.length, 0);
+  process.stderr.write(
+    `[facts-extract] ${input.turnText.length} chars split into ${turns.length} turns` +
+    (unread ? `; WARN: only the first ${MAX_TURN_CHUNKS} are read, ${unread} chars are not` : '') +
+    '\n',
+  );
+  const facts: ExtractedFact[] = [];
+  for (const turnText of kept) {
+    const outcome = await extractFactsFromOneTurn({ ...input, turnText });
+    if (!outcome.ok) return outcome;
+    facts.push(...outcome.facts);
+  }
+  return { ok: true, facts };
+}
+
+async function extractFactsFromOneTurn(
   input: ExtractInput,
 ): Promise<ExtractFactsOutcome> {
   if (input.isDreamGenerated) return { ok: true, facts: [] };

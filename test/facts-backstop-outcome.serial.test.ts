@@ -189,7 +189,7 @@ describe('keyless vs keyed chat_unavailable', () => {
     // Slow-retry policy (R2-5): config drift is fixed on human timescales.
     expect(Number(jobs[0].max_attempts)).toBe(5);
     expect(Number(jobs[0].backoff_delay)).toBe(60_000);
-    expect(Number(jobs[0].timeout_ms)).toBe(10 * 60 * 1000);
+    expect(Number(jobs[0].timeout_ms)).toBe(30 * 60 * 1000);  // fork: hearth#36
   });
 });
 

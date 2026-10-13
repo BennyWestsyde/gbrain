@@ -398,9 +398,10 @@ describe('MinionQueue: #1737 per-handler default timeout', () => {
   // chronicle_extract) but was missing from HANDLER_DEFAULT_TIMEOUT_MS, so it
   // inherited the tight null-default wall-clock and was dead-lettered
   // mid-generation on slow chat providers (facts silently lost).
-  test('facts-absorb gets the 10-min LLM-extraction default (#3207)', async () => {
+  // Fork (hearth#36): a long page is now several extraction calls in one job.
+  test('facts-absorb gets the 30-min split-page default (#3207, hearth#36)', async () => {
     const job = await queue.add('facts-absorb', { slug: 'people/alice-example' });
-    expect(job.timeout_ms).toBe(10 * 60 * 1000);
+    expect(job.timeout_ms).toBe(30 * 60 * 1000);
   });
 
   test('contextual per-chunk reindex gets the 60-min default', async () => {

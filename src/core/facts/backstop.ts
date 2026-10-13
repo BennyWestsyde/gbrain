@@ -600,6 +600,8 @@ async function runPipelineBodyInner(
     abortSignal,
     model: ctx.model,
     notabilityAdmission,
+    // Fork (hearth#36): a page is read to the end, in several turns.
+    splitLongTurn: input.pageSlug !== undefined,
     ...(managed ? { embedding: managed.embedding ?? null } : {}),
   });
   const outcome = managed ? await withAIInvocationPreflight(async call => {
