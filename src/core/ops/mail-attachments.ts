@@ -111,6 +111,8 @@ const list_email_attachments: Operation = {
   params: MESSAGE_PARAMS,
   scope: 'read',
   localOnly: true,
+  // Fork: content comes from Apple Mail on demand, never from stored brain text.
+  outputRedaction: 'no_stored_text',
   annotations: { readOnlyHint: true },
   cliHints: { name: 'email-attachments', positional: ['slug'] },
   handler: async (ctx, p) => {
@@ -150,6 +152,8 @@ const save_email_attachment: Operation = {
   },
   scope: 'admin',
   localOnly: true,
+  // Fork: content comes from Apple Mail on demand, never from stored brain text.
+  outputRedaction: 'no_stored_text',
   annotations: { readOnlyHint: false, destructiveHint: false },
   cliHints: { name: 'email-attachment-save', positional: ['slug'] },
   handler: async (ctx, p) => {
