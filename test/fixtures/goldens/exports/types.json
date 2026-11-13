@@ -485,7 +485,7 @@
         "kind": "variable",
         "name": "DEGRADED_REASONS",
         "signature": [
-          "readonly [\"no_provider\", \"provider_error\", \"timeout\", \"variant_embed_failed\", \"original_embed_failed\", \"first_result_truncated\", \"no_key\", \"empty_result_set\", \"malformed_shape\", \"budget\", \"rate_limited\", \"unreachable\", \"auth\", \"candidate_budget\", \"iterative_scan_unavailable\", \"egress_denied\", \"embedding_disabled\", \"skipped_after_timeout\"]"
+          "readonly [\"no_provider\", \"provider_error\", \"timeout\", \"variant_embed_failed\", \"original_embed_failed\", \"first_result_truncated\", \"no_key\", \"empty_result_set\", \"malformed_shape\", \"budget\", \"rate_limited\", \"unreachable\", \"auth\", \"candidate_budget\", \"iterative_scan_unavailable\", \"egress_denied\", \"embedding_disabled\", \"embedding_model_stale\", \"skipped_after_timeout\"]"
         ]
       },
       {
@@ -499,7 +499,7 @@
         "kind": "type",
         "name": "DegradedReason",
         "signature": [
-          "\"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"skipped_after_timeout\""
+          "\"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"embedding_model_stale\" | \"skipped_after_timeout\""
         ]
       },
       {
@@ -512,7 +512,7 @@
       {
         "kind": "interface",
         "members": [
-          "reason?: \"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"skipped_after_timeout\" | undefined",
+          "reason?: \"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"embedding_model_stale\" | \"skipped_after_timeout\" | undefined",
           "stage: \"embed_unavailable\" | \"embed_timeout\" | \"expansion_failed\" | \"expansion_partial\" | \"rescore_skipped\" | \"vector_arm_failed\" | \"keyword_arm_failed\" | \"title_arm_failed\" | \"budget_dropped_all\" | \"budget_truncated\" | \"keyword_zero\" | \"cache_prestamp\" | \"reranker_skipped\" | \"rerank_passthrough\" | \"rerank_failed\" | \"keyword_relaxed_carried\" | \"safe_index_pending\" | \"vector_candidates_incomplete\" | \"keyword_candidates_incomplete\" | \"projection_pending\" | \"projection_by_design\" | \"projection_status_unknown\" | \"keyword_count_unavailable\""
         ],
         "name": "DegradedStageEntry"
@@ -2770,9 +2770,13 @@
           "deepseek_api_key?: string | undefined",
           "doctor?: { default_budget_ms?: number | string; } | undefined",
           "dream?: { synthesize?: { session_corpus_dir?: string; meeting_transcripts_dir?: string; verdict_model?: string; max_prompt_tokens?: number; max_chunks_per_transcript?: number; subagent_timeout_ms?: number; subagent_wait_timeout_ms?: number; }; patterns?: { lookback_days?: number; min_evidence?: number; }; } | undefined",
+          "email_personal_sender_domains?: string[] | undefined",
+          "embedding_base_url?: string | undefined",
           "embedding_columns?: Record<string, EmbeddingColumnConfig> | undefined",
           "embedding_dimensions?: number | undefined",
           "embedding_disabled?: boolean | undefined",
+          "embedding_fallback_api_key?: string | undefined",
+          "embedding_fallback_base_url?: string | undefined",
           "embedding_image_ocr?: boolean | undefined",
           "embedding_image_ocr_model?: string | undefined",
           "embedding_model?: string | undefined",
@@ -2785,6 +2789,7 @@
           "hooks?: { stop_push_debounce_min?: number | string; } | undefined",
           "integrations?: { memorable?: { enabled?: boolean; }; } | undefined",
           "litellm_api_key?: string | undefined",
+          "lmstudio_api_key?: string | undefined",
           "mcp?: { instructions?: string; publish_skills?: boolean; publish_advisor?: boolean; skills_dir?: string; strict_params?: \"warn\" | \"reject\"; default_surface_dcr?: \"verbs\" | \"starter\" | \"full\"; advertised_surface?: \"verbs\" | \"starter\" | \"full\"; result_rows?: \"lean\" | \"full\"; allow_session_widen?: boolean | string; } | undefined",
           "mcp_surface?: \"verbs\" | \"starter\" | \"full\" | undefined",
           "memory?: { auto_writeback?: string; auto_writeback_transient_ttl?: string; visibility_posture?: string; } | undefined",
@@ -4671,7 +4676,7 @@
           "searchable?: boolean | \"pending\" | undefined",
           "searchable_fix?: Record<string, unknown> | undefined",
           "searchable_retry_after_ms?: number | undefined",
-          "skip_reason?: \"purged_content\" | \"content_rejected\" | \"file_too_large\" | \"frontmatter_slug_conflict\" | \"invalid_fence\" | \"invalid_frontmatter\" | \"parser_regression\" | \"rename_held\" | \"write_gate_rejected\" | \"malformed_path\" | \"slug_collision\" | undefined",
+          "skip_reason?: \"purged_content\" | \"content_rejected\" | \"file_too_large\" | \"frontmatter_slug_conflict\" | \"invalid_fence\" | \"invalid_frontmatter\" | \"parser_regression\" | \"rename_held\" | \"write_gate_rejected\" | \"malformed_path\" | \"slug_collision\" | \"no_extractable_text\" | undefined",
           "slug: string",
           "status: \"error\" | \"imported\" | \"skipped\"",
           "type_warning?: { kind: \"alias_of\" | \"undeclared\"; type: string; canonical?: string; directory?: string; } | undefined"
@@ -7929,6 +7934,7 @@
         "kind": "interface",
         "members": [
           "_embeddingOptedOut?: boolean | undefined",
+          "_embeddingStale?: StaleEmbeddingModel | null | undefined",
           "_queryEmbedDeadline?: (() => QueryEmbedDeadline) | undefined",
           "_queryPrefix?: string | undefined",
           "_searchModeInput?: ResolveSearchModeInput | undefined",
@@ -8808,7 +8814,7 @@
         "kind": "variable",
         "name": "DEGRADED_REASONS",
         "signature": [
-          "readonly [\"no_provider\", \"provider_error\", \"timeout\", \"variant_embed_failed\", \"original_embed_failed\", \"first_result_truncated\", \"no_key\", \"empty_result_set\", \"malformed_shape\", \"budget\", \"rate_limited\", \"unreachable\", \"auth\", \"candidate_budget\", \"iterative_scan_unavailable\", \"egress_denied\", \"embedding_disabled\", \"skipped_after_timeout\"]"
+          "readonly [\"no_provider\", \"provider_error\", \"timeout\", \"variant_embed_failed\", \"original_embed_failed\", \"first_result_truncated\", \"no_key\", \"empty_result_set\", \"malformed_shape\", \"budget\", \"rate_limited\", \"unreachable\", \"auth\", \"candidate_budget\", \"iterative_scan_unavailable\", \"egress_denied\", \"embedding_disabled\", \"embedding_model_stale\", \"skipped_after_timeout\"]"
         ]
       },
       {
@@ -8822,7 +8828,7 @@
         "kind": "type",
         "name": "DegradedReason",
         "signature": [
-          "\"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"skipped_after_timeout\""
+          "\"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"embedding_model_stale\" | \"skipped_after_timeout\""
         ]
       },
       {
@@ -8835,7 +8841,7 @@
       {
         "kind": "interface",
         "members": [
-          "reason?: \"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"skipped_after_timeout\" | undefined",
+          "reason?: \"candidate_budget\" | \"iterative_scan_unavailable\" | \"no_provider\" | \"provider_error\" | \"timeout\" | \"variant_embed_failed\" | \"original_embed_failed\" | \"first_result_truncated\" | \"no_key\" | \"empty_result_set\" | \"malformed_shape\" | \"budget\" | \"rate_limited\" | \"unreachable\" | \"auth\" | \"egress_denied\" | \"embedding_disabled\" | \"embedding_model_stale\" | \"skipped_after_timeout\" | undefined",
           "stage: \"embed_unavailable\" | \"embed_timeout\" | \"expansion_failed\" | \"expansion_partial\" | \"rescore_skipped\" | \"vector_arm_failed\" | \"keyword_arm_failed\" | \"title_arm_failed\" | \"budget_dropped_all\" | \"budget_truncated\" | \"keyword_zero\" | \"cache_prestamp\" | \"reranker_skipped\" | \"rerank_passthrough\" | \"rerank_failed\" | \"keyword_relaxed_carried\" | \"safe_index_pending\" | \"vector_candidates_incomplete\" | \"keyword_candidates_incomplete\" | \"projection_pending\" | \"projection_by_design\" | \"projection_status_unknown\" | \"keyword_count_unavailable\""
         ],
         "name": "DegradedStageEntry"

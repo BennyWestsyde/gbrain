@@ -51,6 +51,7 @@ import { prepareSemanticCache, resolveCacheSearchMode, semanticCacheSkipped, ser
 import { buildPostFusionOpts, joinVectorSide, resolveEarlyModality, runLexicalAndRelational, startVectorSide } from './hybrid/arms.ts';
 import { searchVectorFallback, searchWithoutEmbeddings } from './hybrid/keyword-only.ts';
 import { factEmbeddingDisabled } from '../embedding-disabled.ts';
+import { staleEmbeddingModel, type StaleEmbeddingModel } from './stale-embedding-model.ts';
 import { capSessionPool, collapsePool, expandStructuralNeighbors, finalizeHybridResults, fuseArms, rerankAndPin, sizeReturnPool } from './hybrid/rank.ts';
 import { type StageTimer, UNTIMED } from './stage-timings.ts';
 
@@ -951,6 +952,8 @@ export interface HybridSearchOpts extends SearchOpts {
   _queryPrefix?: string;
   /** INTERNAL — the brain opted out of embedding (factEmbeddingDisabled), read once per request: keyword-only, no query embed. */
   _embeddingOptedOut?: boolean;
+  /** INTERNAL — this process loaded another embedding model than the config names now (staleEmbeddingModel), read once per request: keyword-only, no query embed. */
+  _embeddingStale?: StaleEmbeddingModel | null;
   /** INTERNAL — the op's per-request stage-timing collector (search/stage-timings.ts); absent = untimed. */
   _timings?: StageTimer;
 
@@ -1090,6 +1093,7 @@ export async function hybridSearch(
   }
   if (opts?._queryPrefix === undefined) opts = { ...opts, _queryPrefix: await timer.stage('setup', () => loadEmbeddingQueryPrefix(engine)) };
   if (opts._embeddingOptedOut === undefined) opts = { ...opts, _embeddingOptedOut: await timer.stage('setup', () => factEmbeddingDisabled(engine)) };
+  if (opts._embeddingStale === undefined) opts = { ...opts, _embeddingStale: staleEmbeddingModel() };
   // Named stages (src/core/search/hybrid/): request -> start the vector side
   // (modality + expansion -> vector arms) -> lexical arms -> relational arm ->
   // [keyword-only return] -> join the vector side -> [keyword fallback return]
@@ -1128,7 +1132,7 @@ export async function hybridSearch(
   // Hermetic eval canaries/CI: a caller-supplied queryEmbedFn produces the
   // vector-arm query embedding without the gateway, so provider
   // availability is irrelevant — skip the keyword-only short-circuit.
-  const keywordOnly = opts?.decide?.keywordOnly || (!opts?.queryEmbedFn && (opts?._embeddingOptedOut || !isAvailable('embedding', providerProbe)) && !willTryMultimodal);
+  const keywordOnly = opts?.decide?.keywordOnly || (!opts?.queryEmbedFn && (opts?._embeddingOptedOut || opts?._embeddingStale || !isAvailable('embedding', providerProbe)) && !willTryMultimodal);
   const vectorSide = keywordOnly ? null : startVectorSide(req, multimodalProviderProbe ?? cfgForColumn?.embedding_multimodal_model ?? 'voyage:voyage-multimodal-3');
   const { lexical, relationalList } = await runLexicalAndRelational(req, earlyModality, vectorSide);
   const postFusionOpts = buildPostFusionOpts(req);
@@ -1210,6 +1214,7 @@ export async function hybridSearchCached(
   const { modeInputForCache, resolvedForCache, knobsHash } = await timer.stage('setup', () => resolveCacheSearchMode(engine, opts));
   const queryPrefix = opts?._queryPrefix ?? await timer.stage('setup', () => loadEmbeddingQueryPrefix(engine));
   const embeddingOptedOut = opts?._embeddingOptedOut ?? await timer.stage('setup', () => factEmbeddingDisabled(engine));
+  const embeddingStale = opts?._embeddingStale !== undefined ? opts._embeddingStale : staleEmbeddingModel();
   // Result caching is off (semanticResultCacheAvailable() === false): skip the
   // key/config setup entirely so the wrapper costs no round-trips of its own.
   const semanticCache = semanticResultCacheAvailable()
@@ -1242,7 +1247,7 @@ export async function hybridSearchCached(
       // 'embedding' column (skipCache short-circuits non-default above),
       // so this is the default embeddingModel — but threading it keeps
       // the provider probe consistent with the bare hybridSearch path.
-      if (!embeddingOptedOut && isAvailable('embedding', semanticCache.providerProbe)) {
+      if (!embeddingOptedOut && !embeddingStale && isAvailable('embedding', semanticCache.providerProbe)) {
         // v0.35.0.0+: query-side embedding (cache lookup path).
         // v0.42.20.0 (Fix 3) — bounded by the shared deadline; on timeout this
         // throws → caught below → cacheStatus 'disabled' → falls through to the
@@ -1275,6 +1280,7 @@ export async function hybridSearchCached(
     _queryEmbedDeadline: queryEmbedDl,
     _queryPrefix: queryPrefix,
     _embeddingOptedOut: embeddingOptedOut,
+    _embeddingStale: embeddingStale,
     // #2952 — classify this search's telemetry record (emitted by the inner
     // function) with the cache-consult outcome. 'hit' already returned above,
     // so only miss/disabled reach this call.

@@ -103,6 +103,14 @@ export async function searchWithoutEmbeddings(
       'search-vector-leg-opted-out',
       '[gbrain] embeddings are off on this brain by choice (embedding_disabled), so search is keyword-only and no query text is sent to an embedding provider. If the user wants semantic search, `gbrain doctor --json` names the enable command; turning it on needs their consent.',
     );
+  } else if (!opts?.decide?.keywordOnly && opts?._embeddingStale) {
+    // This process loaded another embedding model than the brain uses now: its query vectors would match no chunk.
+    const { loaded, configured } = opts._embeddingStale;
+    pushDegraded(degraded, 'embed_unavailable', 'embedding_model_stale');
+    warnOncePerProcess(
+      'search-vector-leg-stale-model',
+      `[gbrain] this process loaded embedding model ${loaded}, but the config now names ${configured}, so search is keyword-only until it restarts. Restart this process (for \`gbrain serve\`, restart the MCP client that started it).`,
+    );
   } else if (!opts?.decide?.keywordOnly) {
     pushDegraded(degraded, 'embed_unavailable', 'no_provider');
     // #3808: meta names the degradation for programmatic callers, but a CLI

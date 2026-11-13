@@ -2118,6 +2118,7 @@ export const DEGRADED_REASONS = [
   'iterative_scan_unavailable',
   'egress_denied', // System One: the Jev reranker skipped a query with a candidate from decide.egress.deny_sources
   'embedding_disabled', // the brain opted out of embedding: the query text was never sent to the provider
+  'embedding_model_stale', // this process loaded another embedding model than the config names now: no query embed until it restarts
   'skipped_after_timeout', // #6495: keyword_arm_failed; the same keyword statement timed out within search.keyword_timeout_negative_cache_seconds
 ] as const;
 export type DegradedReason = (typeof DEGRADED_REASONS)[number];
